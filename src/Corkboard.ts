@@ -77,7 +77,7 @@ export class CameraApi {
 
   // Fits the given cards (default: all) in the view.
   fit(ids?: readonly ElementId[], o: CameraOptions = {}): void {
-    this.zoomTo(this.stage.contentBounds(ids), o);
+    this.stage.fitRect(() => this.stage.contentBounds(ids), o.animate ?? true, o.padding ?? 48);
   }
 
   // Fits a world rectangle in the view.

@@ -51,16 +51,39 @@ export class CameraController {
   private samples: { t: number; x: number; y: number }[] = [];
   private fly: FlyTo | null = null;
   private lastDrag: { x: number; y: number } | null = null;
+  // The host has no size yet (hidden tab, pane not laid out): the viewport is a 1 px placeholder.
+  private empty = false;
+  // A fit asked for while `empty`; `version` is the camera version it was asked at.
+  private pendingFit: { target: () => Rect; pad: number; version: number } | null = null;
 
   constructor(
     private readonly wake: () => void,
     private readonly bounds: { min: number; max: number } = { min: MIN_SCALE, max: MAX_SCALE },
   ) {}
 
-  setViewport(w: number, h: number): void {
+  // `empty`: the host is 0 in either axis; w and h are then only placeholders. A fit requested meanwhile is
+  // applied (without animation) by the first call with a real size, unless the camera moved since.
+  setViewport(w: number, h: number, empty = false): void {
+    const untouched = this.pendingFit !== null && this.pendingFit.version === this.version;
     this.width = w;
     this.height = h;
+    this.empty = empty;
     this.version++;
+    const p = this.pendingFit;
+    if (!p) return;
+    if (empty) {
+      // Only the placeholder size changed: still the same camera.
+      if (untouched) p.version = this.version;
+      else this.pendingFit = null;
+      return;
+    }
+    this.pendingFit = null;
+    if (untouched) this.jumpTo(this.fitCamera(p.target(), p.pad));
+  }
+
+  // The host has no size (yet): see setViewport.
+  get isEmpty(): boolean {
+    return this.empty;
   }
 
   get scale(): number {
@@ -187,7 +210,22 @@ export class CameraController {
     };
   }
 
+  // Fits `target` in the viewport. With an empty viewport (see setViewport) it would compute the minimum
+  // zoom and leave the board off-centre: the request is kept and applied at the first real size instead.
+  // `target` is read when the fit is applied, so cards added meanwhile count.
+  requestFit(target: () => Rect, pad = 48, animate = true, duration?: number): void {
+    if (this.empty) {
+      this.pendingFit = { target, pad, version: this.version };
+      return;
+    }
+    this.pendingFit = null;
+    const c = this.fitCamera(target(), pad);
+    if (animate) this.flyTo(c, duration);
+    else this.jumpTo(c);
+  }
+
   jumpTo(c: Camera): void {
+    this.pendingFit = null;
     this.fly = null;
     this.vel.vx = this.vel.vy = 0;
     this.cam.tx = c.tx;
@@ -199,6 +237,7 @@ export class CameraController {
 
   // Animated move (log-space on the scale so a long zoom feels even).
   flyTo(c: Camera, duration = 380): void {
+    this.pendingFit = null;
     this.vel.vx = this.vel.vy = 0;
     this.targetScale = this.cam.scale;
     this.fly = {

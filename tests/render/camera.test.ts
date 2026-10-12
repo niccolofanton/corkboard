@@ -95,4 +95,66 @@ describe('CameraController', () => {
     expect(cam.cam.tx).toBeCloseTo(-500, 3);
     expect(cam.cam.ty).toBeCloseTo(-300, 3);
   });
+
+  describe('a fit asked for while the host has no size', () => {
+    const world = { x0: 0, y0: 0, x1: 1000, y1: 500 };
+    const empty = () => {
+      const cam = new CameraController(() => {});
+      cam.setViewport(1, 1, true);
+      return cam;
+    };
+
+    it('does not compute a 1 px fit, and applies it at the first real size, centred', () => {
+      const cam = empty();
+      cam.requestFit(() => world, 50, true);
+      expect(cam.cam).toEqual({ tx: 0, ty: 0, scale: 1 });
+      expect(cam.busy).toBe(false);
+      cam.setViewport(1200, 700);
+      // 1100 x 600 available: scale 1.1, the 1000 x 500 world centred.
+      expect(cam.cam.scale).toBeCloseTo(1.1, 6);
+      expect(cam.cam.tx).toBeCloseTo((1200 - 1000 * 1.1) / 2, 6);
+      expect(cam.cam.ty).toBeCloseTo((700 - 500 * 1.1) / 2, 6);
+      expect(cam.busy).toBe(false); // jumped, not flown
+    });
+
+    it('reads the target when it is applied, and keeps waiting while one axis is still 0', () => {
+      const cam = empty();
+      let rect = world;
+      cam.requestFit(() => rect, 0);
+      cam.setViewport(800, 1, true);
+      expect(cam.cam.scale).toBe(1);
+      rect = { x0: 0, y0: 0, x1: 400, y1: 200 };
+      cam.setViewport(800, 400);
+      expect(cam.cam.scale).toBeCloseTo(2, 6);
+    });
+
+    it('is dropped when the user moved the camera meanwhile', () => {
+      const cam = empty();
+      cam.requestFit(() => world, 0);
+      cam.panBy(30, 10);
+      cam.setViewport(1000, 500);
+      expect(cam.cam).toEqual({ tx: 30, ty: 10, scale: 1 });
+    });
+
+    it('is dropped by a later explicit camera move, and applies once only', () => {
+      const cam = empty();
+      cam.requestFit(() => world, 0);
+      cam.jumpTo({ tx: 5, ty: 6, scale: 2 });
+      cam.setViewport(1000, 500);
+      expect(cam.cam).toEqual({ tx: 5, ty: 6, scale: 2 });
+
+      const again = empty();
+      again.requestFit(() => world, 0);
+      again.setViewport(1000, 500);
+      again.jumpTo({ tx: 0, ty: 0, scale: 3 });
+      again.setViewport(500, 500);
+      expect(again.cam.scale).toBe(3);
+    });
+
+    it('fits at once when the host has a size', () => {
+      const { cam } = make();
+      cam.requestFit(() => world, 0, false);
+      expect(cam.cam.scale).toBeCloseTo(1.28, 6);
+    });
+  });
 });

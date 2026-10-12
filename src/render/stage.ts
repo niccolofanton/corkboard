@@ -312,13 +312,14 @@ export class Stage {
 
     const measure = (): void => {
       const r = host.getBoundingClientRect();
+      const empty = Math.round(r.width) < 1 || Math.round(r.height) < 1;
       const w = Math.max(1, Math.round(r.width));
       const h = Math.max(1, Math.round(r.height));
-      if (w === this.cam.width && h === this.cam.height) return;
+      if (w === this.cam.width && h === this.cam.height && empty === this.cam.isEmpty) return;
       this.renderer.resize(w, h, this.dpr);
       this.bg.width = w;
       this.bg.height = h;
-      this.cam.setViewport(w, h);
+      this.cam.setViewport(w, h, empty);
       this.mountedWin = null;
       this.dirty = true;
       // Resizing clears the drawing buffer: draw it again before the browser paints, or the canvas
@@ -838,15 +839,13 @@ export class Stage {
   }
 
   fit(animate = true, pad = 48): void {
-    const c = this.cam.fitCamera(this.contentBounds(), pad);
-    if (animate) this.cam.flyTo(c);
-    else this.cam.jumpTo(c);
+    this.cam.requestFit(() => this.contentBounds(), pad, animate);
   }
 
-  fitRect(r: Rect, animate = true, pad = 48): void {
-    const c = this.cam.fitCamera(r, pad);
-    if (animate) this.cam.flyTo(c, 440);
-    else this.cam.jumpTo(c);
+  // `r` may be a function: it is read when the fit is applied (a fit asked for on a host that has no size
+  // yet waits for the first real size).
+  fitRect(r: Rect | (() => Rect), animate = true, pad = 48): void {
+    this.cam.requestFit(typeof r === 'function' ? r : () => r, pad, animate, 440);
   }
 
   zoomToActual(): void {
