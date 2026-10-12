@@ -17,4 +17,6 @@ export interface ViewDefinition {
 export const VIEW_DEFINITIONS: Record<ElementKind, ViewDefinition> = {
   image: { variant: 'media', create: () => new MediaView(), textured: true },
   video: { variant: 'media', create: () => new MediaView(), textured: true },
+  // The poster of an embed is its texture; the live iframe is a DOM layer (src/embed/*).
+  embed: { variant: 'media', create: () => new MediaView(), textured: true },
 };

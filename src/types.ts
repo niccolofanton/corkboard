@@ -2,19 +2,34 @@
 //
 // Coordinates are world px at zoom 1. `rot` is DEGREES clockwise about the element's centre.
 
-// Element kinds. Adding a kind (an `embed` card holding an iframe or HTML, say) is one view
-// (src/render/views/registry.ts) plus, when it needs DOM, one overlay (src/overlay.ts).
-export type ElementKind = 'image' | 'video';
+// Element kinds. Adding a kind is one view (src/render/views/registry.ts) plus, when it needs DOM, one
+// overlay (src/overlay.ts) or a layer like the video and embed ones (src/video, src/embed).
+export type ElementKind = 'image' | 'video' | 'embed';
 
 export type ElementId = string;
 
+// What an `embed` card shows live: a page (`url`) or a snippet of HTML (`html`), in a sandboxed iframe.
+// Exactly one of the two. The sandbox profile is derived from this and the provider at render time and is
+// never stored (src/embed/sandbox.ts).
+export type EmbedSource = (
+  | { url: string; html?: undefined }
+  | { html: string; url?: undefined }
+) & {
+  // Shown on the generated tile and in the iframe's `title`.
+  title?: string;
+};
+
 // Where a card's pixels come from.
 export interface MediaSource {
-  // The picture: an image URL, or the poster of a video. Must be fetchable with CORS (the decode worker
-  // reads it with `fetch`, then uploads it to WebGL).
-  src: string;
+  // The picture: an image URL, or the poster of a video or an embed. Must be fetchable with CORS (the
+  // decode worker reads it with `fetch`, then uploads it to WebGL). Required for `image` and `video`
+  // cards. An `embed` card may leave it out: the embed layer fills it with a poster it resolves (a
+  // provider thumbnail, the `resolve` option's, or a generated tile).
+  src?: string;
   // The video file, for a `video` card. Played in a DOM <video> laid over the card (src/video/*).
   video?: string;
+  // The content of an `embed` card. Makes the card an `embed` unless `kind` says otherwise.
+  embed?: EmbedSource;
   // Optional smaller / larger renditions of `src`. The texture pipeline picks the level that matches
   // the card's size on screen: `small` fills an atlas cell (~160 px long side), `medium` is the sharp
   // texture of a card at normal zoom (~480 px), `large` is for close zoom (~1600 px). A missing
@@ -73,6 +88,8 @@ export const DEFAULTS = {
   cardWidth: 248,
   cardAspect: 1.25,
   videoAspect: 9 / 16,
+  embedAspect: 9 / 16,
+  embedWidth: 400,
   cardRadius: 8,
   minCardW: 40,
   maxCardW: 1600,

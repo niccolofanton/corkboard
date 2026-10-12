@@ -1,5 +1,6 @@
 // Turns what the host passes to `add` into stored elements.
 import { thumbHashToApproximateAspectRatio } from 'thumbhash';
+import { parseEmbedUrl } from './embed/providers';
 import { DEFAULTS, type Element, type ElementInit, type ElementKind, type MediaSource } from './types';
 
 function decodeBase64(s: string): Uint8Array {
@@ -24,18 +25,23 @@ export function aspectOf(media: MediaSource, kind: ElementKind): number {
       // A malformed hash: fall through to the default.
     }
   }
+  if (kind === 'embed') {
+    // A known provider has a shape of its own (16:9 for a video, a strip for a Spotify track).
+    const url = media.embed?.url;
+    return (url !== undefined ? parseEmbedUrl(url)?.aspect : undefined) ?? DEFAULTS.embedAspect;
+  }
   return kind === 'video' ? DEFAULTS.videoAspect : DEFAULTS.cardAspect;
 }
 
 export const kindOf = (init: Pick<ElementInit, 'kind' | 'media'>): ElementKind =>
-  init.kind ?? (init.media.video ? 'video' : 'image');
+  init.kind ?? (init.media.embed ? 'embed' : init.media.video ? 'video' : 'image');
 
 // Size of a card: a given `w` and `h` win; a lone `w` or `h` is completed with the aspect.
 export function sizeOf(init: ElementInit, kind: ElementKind): { w: number; h: number } {
   const aspect = aspectOf(init.media, kind);
   if (init.w !== undefined && init.h !== undefined) return { w: init.w, h: init.h };
   if (init.h !== undefined) return { w: init.h / aspect, h: init.h };
-  const w = init.w ?? DEFAULTS.cardWidth;
+  const w = init.w ?? (kind === 'embed' ? DEFAULTS.embedWidth : DEFAULTS.cardWidth);
   return { w, h: Math.max(1, Math.round(w * aspect)) };
 }
 
