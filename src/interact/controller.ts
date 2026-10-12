@@ -621,6 +621,9 @@ export class Interaction {
 
   // ── Keyboard ───────────────────────────────────────────────────────────────
   private onKey(e: KeyboardEvent): void {
+    // Keydown bubbles from everything inside the host (an overlay's <input>, a toolbar button): only keys
+    // pressed on the board itself are the board's.
+    if (e.target !== this.host) return;
     if (e.code === 'Space') {
       this.spaceDown = true;
       e.preventDefault();
