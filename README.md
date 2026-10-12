@@ -1,17 +1,12 @@
-# corkboard
+# Corkboard
 
-An infinite canvas of image, video and embed cards on WebGL (Pixi v8). Framework-agnostic TypeScript.
+![Corkboard](docs/preview.gif)
 
-![corkboard demo](docs/screenshot.png)
+Corkboard is a framework-agnostic TypeScript library that puts an infinite WebGL canvas of image, video and embed cards on screen, built on Pixi v8 and extracted from a moodboard app. It is meant for large boards on an ordinary laptop, so most of the work is in not doing work: the render loop is on demand and sits at 0 requestAnimationFrame callbacks while nothing moves, and an rbush index culls cards outside the view.
 
-- Camera: wheel / trackpad pan, pinch and ctrl+wheel zoom, drag with inertia, fit, zoom to rect, animated flights.
-- On-demand render loop (0 requestAnimationFrame callbacks while idle), rbush culling, LOD textures
-  (ThumbHash, atlas, own textures) decoded in workers, LRU memory budget, WebGL context-loss recovery.
-- `image`, `video` and `embed` cards. A video card is its poster in WebGL plus a live DOM `<video>` overlay; an embed
-  (a YouTube / Vimeo / Spotify / CodePen / Figma link, any page, or a snippet of HTML) is its poster plus, only when it
-  is big on screen or selected, one sandboxed `<iframe>`.
-- Auto layout (masonry, tidy grid, align, distribute, equal width, auto spot) and snapping (smart guides, snap to the dot grid).
-- Select, marquee, drag-move and handle-resize. No undo, no collaboration.
+Pictures go through a level-of-detail pipeline that starts at a ThumbHash, moves to a shared atlas, and ends in per-card textures with baked rounded corners, all decoded in workers and kept under an LRU memory budget. A video card is its poster in WebGL plus a `<video>` element synced to the camera; an embed (YouTube, Vimeo, Spotify, CodePen, Figma, any page or a snippet of HTML) is a poster sprite that becomes a sandboxed iframe, laid out at a virtual 720p or 1080p screen and scaled down, only when it is large on screen or selected. Auto layout (masonry, tidy grid, align, distribute) animates cards to their new places, and dragging snaps to smart guides or to the dot grid.
+
+**Live: [corkboard.niccolofanton.dev](https://corkboard.niccolofanton.dev)**
 
 ## Quick start
 
