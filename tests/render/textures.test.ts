@@ -13,7 +13,9 @@ class FakeWorker {
   onmessage: ((e: MessageEvent) => void) | null = null;
   onerror: ((e: unknown) => void) | null = null;
   sent: Array<{ op: string; rid: number }> = [];
-  constructor() {
+  args: unknown[];
+  constructor(...args: unknown[]) {
+    this.args = args;
     FakeWorker.all.push(this);
   }
   postMessage(m: { op: string; rid: number }): void {
@@ -76,5 +78,25 @@ describe('TextureManager worker load', () => {
     const live = w.sent.filter((m) => m.op === 'load' && !stale.includes(m.rid))[0];
     w.reply({ op: 'fail', rid: live.rid, reason: 'x', aborted: false });
     expect(load()).toEqual([0]);
+  });
+});
+
+describe('TextureManager worker source', () => {
+  it('starts the built-in worker by default, and a module worker at textures.workerUrl when given', () => {
+    // `tm` (beforeEach) has no workerUrl: the built-in wrapper made it.
+    expect(FakeWorker.all).toHaveLength(1);
+    expect(String(FakeWorker.all[0].args[0])).not.toContain('cdn.test');
+    FakeWorker.all = [];
+    const custom = new TextureManager({ texture: {}, gl: {} } as never, {
+      budgetBytes: 1,
+      workers: 2,
+      workerUrl: 'https://cdn.test/decode.worker.js',
+      onWake: () => {},
+    });
+    expect(FakeWorker.all.map((w) => w.args)).toEqual([
+      ['https://cdn.test/decode.worker.js', { type: 'module' }],
+      ['https://cdn.test/decode.worker.js', { type: 'module' }],
+    ]);
+    custom.dispose();
   });
 });

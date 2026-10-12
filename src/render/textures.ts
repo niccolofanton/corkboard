@@ -14,6 +14,7 @@
 // Texture memory follows what is on screen, not the board size: an LRU over the own textures (and, past
 // that, cold L1 cells) keeps the total under `budgetBytes`. Teardown is always deferred (retire.ts).
 import { ImageSource, Rectangle, Texture, TextureSource, type WebGLRenderer } from 'pixi.js';
+import DecodeWorker from './decode.worker?worker&inline';
 import { Atlas, cellsPerPage, type AtlasCell } from './atlas';
 import type { DecodeRequest, WorkerIn, WorkerOut } from './decode.protocol';
 import type { Level } from './lod';
@@ -35,6 +36,8 @@ const L1_PAGE_BYTES = L1_SPEC.pageSize ** 2 * 4 * MIP_FACTOR;
 export interface TextureManagerOptions {
   budgetBytes: number;
   workers: number;
+  // URL of a module worker script to use instead of the built-in one (see StageOptions.workerUrl).
+  workerUrl?: string | URL;
   // Bake corners in a software canvas in the workers (default false: measured ~2x slower to load).
   softCanvas?: boolean;
   // CSS colour of the 1 px card hairline baked into L1+ textures ('' = none).
@@ -183,7 +186,11 @@ export class TextureManager {
 
   private spawnWorkers(n: number): void {
     for (let i = 0; i < n; i++) {
-      const w = new Worker(new URL('./decode.worker.ts', import.meta.url), { type: 'module' });
+      // The built-in worker is inlined in the library bundle (a blob URL made at run time), so no asset URL
+      // has to survive the host's bundler or dev server.
+      const w = this.opts.workerUrl
+        ? new Worker(this.opts.workerUrl, { type: 'module' })
+        : new DecodeWorker();
       w.onmessage = (e: MessageEvent<WorkerOut>) => this.onWorker(i, e.data);
       w.onerror = (e) => console.error('[corkboard] decode worker error', e.message);
       this.workers.push(w);

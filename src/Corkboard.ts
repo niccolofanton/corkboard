@@ -39,7 +39,7 @@ export interface CorkboardOptions {
   // Embed cards (`media.embed`): live iframe limits and the poster / framing `resolve` hook.
   embeds?: EmbedOptions;
   // Texture pipeline knobs.
-  textures?: Pick<StageOptions, 'budgetBytes' | 'workers' | 'uploadBudgetMs' | 'overscan' | 'softCanvas'>;
+  textures?: Pick<StageOptions, 'budgetBytes' | 'workers' | 'workerUrl' | 'uploadBudgetMs' | 'overscan' | 'softCanvas'>;
   // Extra DOM overlays (a new element kind that needs live DOM).
   overlays?: OverlayFactory[];
   // Load Pixi's CSP-safe build (no `new Function`).

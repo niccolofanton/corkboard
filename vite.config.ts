@@ -1,7 +1,9 @@
 import { defineConfig } from 'vitest/config';
 
-// Library build: ES + CJS bundles in dist/. pixi.js, rbush and thumbhash stay external (dependencies).
-// The decode worker is emitted as its own chunk and referenced with `new URL(..., import.meta.url)`.
+// Library build: one ES bundle in dist/. pixi.js, rbush and thumbhash stay external (peer / dependencies).
+// The decode worker is inlined (`?worker&inline`, started from a blob URL), so a host's bundler or dev server
+// never has to resolve a worker asset. vite.worker.config.ts also emits it as dist/decode.worker.js for
+// pages whose CSP forbids blob workers (`textures.workerUrl`).
 export default defineConfig({
   base: './',
   build: {

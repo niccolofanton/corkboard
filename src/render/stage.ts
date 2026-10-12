@@ -42,6 +42,9 @@ export interface StageOptions {
   budgetBytes?: number;
   // Decode workers (default: a quarter of the cores, 1..4).
   workers?: number;
+  // URL of the decode worker script, for pages whose CSP forbids `worker-src blob:` (the built-in worker is
+  // inlined and started from a blob URL). Serve `corkboard/decode.worker` yourself and pass its URL here.
+  workerUrl?: string | URL;
   softCanvas?: boolean;
   // Per-frame texture upload budget, ms (default 4).
   uploadBudgetMs?: number;
@@ -96,7 +99,7 @@ export class Stage {
   private readonly bg: TilingSprite;
   private readonly canvas: HTMLCanvasElement;
   private readonly opts: Required<
-    Omit<StageOptions, 'theme' | 'workers' | 'retireDelay' | 'cspSafe' | 'grid'>
+    Omit<StageOptions, 'theme' | 'workers' | 'workerUrl' | 'retireDelay' | 'cspSafe' | 'grid'>
   > & { workers: number; retireDelay?: number };
   private readonly ro: ResizeObserver;
   private readonly cleanups: (() => void)[] = [];
@@ -271,6 +274,7 @@ export class Stage {
     this.tm = new TextureManager(this.renderer, {
       budgetBytes: this.opts.budgetBytes,
       workers: this.opts.workers,
+      workerUrl: options.workerUrl,
       softCanvas: options.softCanvas,
       border: this.borderCss(),
       retireDelay: this.opts.retireDelay,

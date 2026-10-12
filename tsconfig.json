@@ -33,6 +33,7 @@
     "tests",
     "demo",
     "vite.config.ts",
-    "vite.demo.config.ts"
+    "vite.demo.config.ts",
+    "vite.worker.config.ts"
   ]
 }
