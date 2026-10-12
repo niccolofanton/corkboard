@@ -8,6 +8,14 @@ Pictures go through a level-of-detail pipeline that starts at a ThumbHash, moves
 
 **Live: [corkboard.niccolofanton.dev](https://corkboard.niccolofanton.dev)**
 
+## Install
+
+```sh
+pnpm add corkboard pixi.js
+```
+
+`pixi.js` (^8.22.0) is a peer dependency: one copy, shared with your app.
+
 ## Quick start
 
 ```ts
@@ -25,6 +33,15 @@ board.on('selection', ({ ids }) => console.log(ids));
 
 Pictures are read by a decode worker with `fetch`, so they need CORS headers. Videos only need to be playable by `<video>`.
 
+The decode worker is inlined in the library and started from a blob URL, so it works under any bundler or dev server (no
+asset URL to resolve, no `optimizeDeps` setting). A page whose CSP has no `worker-src blob:` (or `child-src blob:` /
+`script-src blob:` as the fallback) can serve the worker itself instead:
+
+```ts
+import workerUrl from 'corkboard/decode.worker?url'; // Vite; any bundler that gives you the file's URL
+await Corkboard.create(el, { textures: { workerUrl } });
+```
+
 ## API
 
 - `Corkboard.create(host, options)`: `theme`, `grid`, `snapping`, `interaction`, `video`, `embeds`, `textures`, `overlays`, `cspSafe`.
@@ -32,9 +49,17 @@ Pictures are read by a decode worker with `fetch`, so they need CORS headers. Vi
 - Selection: `selection`, `select(ids)`, `selectAll()`, `clearSelection()`.
 - `board.layout`: `tidy(ids?, opts)`, `masonry(ids?, opts)`, `align(mode, ids?)`, `distribute(axis, ids?)`, `equalWidth(ids?)`.
 - `board.camera`: `get()`, `set(cam)`, `fit(ids?)`, `zoomTo(rect)`, `zoomBy(k)`, `actual()`, `center(x, y, scale?)`, `visible()`, `screenToWorld`, `worldToScreen`.
-- Settings: `setTheme`, `setGrid`, `setSnapping({ guides, grid })`, `setVideo({ mode: 'always' | 'hover' | 'off', loop, muted })`, `setVideoPaused`, `setEmbeds({ maxLive, maxLiveTouch, minLivePx, resolution })`.
+- Settings: `setTheme`, `setGrid`, `setSnapping({ guides, grid })`, `setVideo({ mode: 'always' | 'hover' | 'off', loop, muted, minPlayPx, maxPlaying, maxPlayingTouch })`, `setVideoPaused`, `setEmbeds({ maxLive, maxLiveTouch, minLivePx, resolution, arbitrarySameOrigin })`.
 - Events (`board.on(type, fn)` returns an unsubscribe): `selection`, `hover`, `click`, `dblclick`, `transform`, `gesture`, `delete`, `change`, `camera`, `cameraSettled`, `embedInteract`, `embedLive`, `embedResolved`.
 - `stats()`, `dispose()`. The pure layout and snapping functions, `Store`, `Stage` and `Interaction` are exported too.
+
+- `textures`: `budgetBytes`, `workers`, `workerUrl`, `uploadBudgetMs`, `overscan`, `softCanvas`.
+- `video` (`mode: 'always'`): a card plays on its own only if its long side is at least `minPlayPx` CSS px on screen
+  (default 160), and at most `maxPlaying` play at once (default 8; `maxPlayingTouch`, default 2, on touch), the biggest and
+  most central first. Smaller or surplus cards stay a thumbnail, so a zoomed-out board opens no streams.
+- `camera.fit()` on a host that has no size yet (hidden tab, pane not laid out) waits for the first real size and then
+  centres, unless the camera was moved meanwhile.
+- Keyboard shortcuts act only while the board itself has focus, never for keys typed in an `<input>` inside the host.
 
 A card is `{ media: { src, video?, sizes?, aspect?, thumbhash?, color? }, x?, y?, w?, h?, rot?, radius?, locked?, aspectLocked?, data? }`.
 Cards with no `x` / `y` are placed on a free spot near what is on screen.
@@ -69,6 +94,14 @@ board.add({ media: { embed: { html: '<button onclick="this.textContent=1">0</but
 - Sandbox, computed at render time and never stored: allowlisted providers get `allow-scripts allow-same-origin allow-forms
   allow-popups allow-presentation`; other URLs the same minus `allow-presentation`; snippets run in `srcdoc` with `allow-scripts`
   only plus a CSP (no network). Only http(s) URLs load. A snippet has no storage and cannot reach the page.
+  The allowlist is the exact embed URLs the built-in parsers emit (`youtube-nocookie.com/embed/`, `player.vimeo.com/video/`,
+  `open.spotify.com/embed/`, `codepen.io/<user>/embed/`, `figma.com/embed`), not whole hosts.
+- Arbitrary URLs keep `allow-same-origin` because many sites break without their own cookies and storage. The risk: the
+  sandbox flags survive navigation inside the frame, so a link followed in interact mode loads the next site with scripts
+  and its real origin (it still cannot reach your page; a frame on your own origin never gets the flag). To give those frames
+  an opaque origin instead, pass `embeds: { arbitrarySameOrigin: false }` (also `setEmbeds`).
+- A `blob:` `media.src` on an embed card is treated as a poster this layer made (it dies with the page): it is replaced, and
+  `embedResolved.poster` never reports a blob. Persist `embedResolved.poster` (an https URL), not `media.src`, when you save a board.
 - Live state: `board.embeds.live`, `board.embeds.interacting`, `board.embeds.interact(id)`, `board.embeds.info(id)`.
 
 ## Adding an element kind
@@ -84,11 +117,11 @@ one `Overlay` (`src/overlay.ts`) passed through `options.overlays`.
 ## Development
 
 ```sh
-pnpm install
+pnpm install    # pnpm 10.11.1 (see packageManager); pixi.js is a devDependency here
 pnpm dev        # the demo (600 cards)
 pnpm test
 pnpm typecheck
-pnpm build      # dist/ with .d.ts
+pnpm build      # dist/ with .d.ts and dist/decode.worker.js
 ```
 
 ## License
