@@ -11,6 +11,13 @@ export type SandboxProfile = 'provider' | 'arbitrary' | 'snippet';
 export const SANDBOX_PROVIDER =
   'allow-scripts allow-same-origin allow-forms allow-popups allow-presentation';
 // Any other URL: the same minus presentation.
+//
+// `allow-same-origin` is kept here on purpose: many sites break without their own cookies and storage.
+// The risk: the sandbox flags survive navigation inside the frame, so a link the user follows in interact
+// mode loads the next site with scripts AND its real origin (cookies, storage, credentialed requests to
+// its own server). It never reaches the board's page (another origin; a frame on the app's own origin loses
+// the flag, see `appOrigin`). `embeds.arbitrarySameOrigin: false` drops the flag for every arbitrary URL
+// (opaque origin: no cookies, no storage), at the cost of the sites that need them.
 export const SANDBOX_ARBITRARY = 'allow-scripts allow-same-origin allow-forms allow-popups';
 // User HTML: scripts only. No `allow-same-origin` (the frame gets an opaque origin: no cookies, no storage,
 // no parent DOM), no forms, no popups.
@@ -73,6 +80,8 @@ export interface IframeInput {
   iframeSrc?: string;
   // The origin of the page hosting the board: a frame on it never gets `allow-same-origin`.
   appOrigin?: string;
+  // Keep `allow-same-origin` on arbitrary URLs (default true). See SANDBOX_ARBITRARY.
+  arbitrarySameOrigin?: boolean;
 }
 
 // null: nothing safe to load (not an http(s) URL).
@@ -86,7 +95,7 @@ export function iframeSpecFor(input: IframeInput): IframeSpec | null {
       srcdoc: snippetDocument(source.html),
       sandbox: SANDBOX_SNIPPET,
       allow: '',
-        referrerPolicy: REFERRER_POLICY,
+      referrerPolicy: REFERRER_POLICY,
       loading: 'lazy',
       title,
     };
@@ -96,6 +105,7 @@ export function iframeSpecFor(input: IframeInput): IframeSpec | null {
   const provider = providerOfIframeSrc(src);
   const allowlisted = provider !== 'generic';
   let sandbox = allowlisted ? SANDBOX_PROVIDER : SANDBOX_ARBITRARY;
+  if (!allowlisted && input.arbitrarySameOrigin === false) sandbox = sandbox.replace(' allow-same-origin', '');
   // `allow-scripts` + `allow-same-origin` on the app's own origin lets the frame remove its sandbox.
   if (input.appOrigin !== undefined && originOf(src) === input.appOrigin) {
     sandbox = sandbox.replace(' allow-same-origin', '');

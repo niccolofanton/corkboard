@@ -80,9 +80,22 @@ describe('iframeSpecFor', () => {
     expect(other?.sandbox).toContain('allow-same-origin');
   });
 
+  it('drops allow-same-origin from arbitrary URLs only when arbitrarySameOrigin is false', () => {
+    const arb = iframeSpecFor({ source: { url: 'https://other.test/page' }, arbitrarySameOrigin: false });
+    expect(arb?.sandbox).toBe('allow-scripts allow-forms allow-popups');
+    const dflt = iframeSpecFor({ source: { url: 'https://other.test/page' }, arbitrarySameOrigin: true });
+    expect(dflt?.sandbox).toBe(SANDBOX_ARBITRARY);
+    const yt = iframeSpecFor({
+      source: { url: 'https://youtu.be/dQw4w9WgXcQ' },
+      iframeSrc: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
+      arbitrarySameOrigin: false,
+    });
+    expect(yt?.sandbox).toBe(SANDBOX_PROVIDER);
+  });
+
   it('never grants navigation, modals, pointer lock, downloads or popup escape', () => {
     const specs = [
-      iframeSpecFor({ source: { url: 'https://youtu.be/dQw4w9WgXcQ' }, iframeSrc: 'https://www.youtube.com/embed/x' }),
+      iframeSpecFor({ source: { url: 'https://youtu.be/dQw4w9WgXcQ' }, iframeSrc: 'https://www.youtube-nocookie.com/embed/x' }),
       iframeSpecFor({ source: { url: 'https://example.com' } }),
       iframeSpecFor({ source: { html: 'x' } }),
     ];
