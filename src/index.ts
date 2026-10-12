@@ -10,6 +10,7 @@ export type {
   ElementInit,
   ElementKind,
   ElementPatch,
+  EmbedSource,
   MediaSource,
 } from './types';
 export type { Camera, Rect } from './math';
@@ -42,3 +43,4 @@ export { hitTest } from './interact/hitTest';
 export { elementsInBox } from './interact/marquee';
 export type { Box } from './interact/geometry';
 export { VideoLayer } from './video/layer';
+export * from './embed/index';

@@ -9,6 +9,7 @@
 //
 // `create` mounts a WebGL canvas and a DOM overlay layer in `host` (which needs a size: it is observed)
 // and sets `position: relative` on it if it was static.
+import { EmbedLayer, type EmbedEvents, type EmbedOptions } from './embed/layer';
 import { Emitter } from './events';
 import { Interaction, type InteractionEvents, type InteractionOptions } from './interact/controller';
 import { DEFAULT_SNAPPING, type SnapSettings } from './interact/snap';
@@ -35,6 +36,8 @@ export interface CorkboardOptions {
   interaction?: boolean | InteractionOptions;
   // Video playback (see VideoOptions).
   video?: VideoOptions;
+  // Embed cards (`media.embed`): live iframe limits and the poster / framing `resolve` hook.
+  embeds?: EmbedOptions;
   // Texture pipeline knobs.
   textures?: Pick<StageOptions, 'budgetBytes' | 'workers' | 'uploadBudgetMs' | 'overscan' | 'softCanvas'>;
   // Extra DOM overlays (a new element kind that needs live DOM).
@@ -45,7 +48,7 @@ export interface CorkboardOptions {
   gpuTimer?: boolean;
 }
 
-export interface CorkboardEvents extends InteractionEvents {
+export interface CorkboardEvents extends InteractionEvents, EmbedEvents {
   // Elements were added, changed or removed (from the API or from a gesture).
   change: { added: readonly Element[]; updated: readonly Element[]; removed: readonly Element[] };
   // The camera moved (every frame of a move).
@@ -133,6 +136,8 @@ export class Corkboard {
   private readonly snapSettings: SnapSettings;
   private readonly overlayRoot: HTMLElement;
   private readonly videoLayer: VideoLayer;
+  // The live iframes of the `embed` cards (see src/embed/layer.ts).
+  readonly embeds: EmbedLayer;
   private readonly overlays: Overlay[] = [];
   private readonly cleanups: (() => void)[] = [];
   private disposed = false;
@@ -175,6 +180,16 @@ export class Corkboard {
     host.appendChild(this.overlayRoot);
 
     this.videoLayer = new VideoLayer({ root: this.overlayRoot, store: this.store, stage }, options.video);
+    this.embeds = new EmbedLayer(
+      {
+        root: this.overlayRoot,
+        host,
+        store: this.store,
+        stage,
+        emit: (type, payload) => this.emitter.emit(type, payload as CorkboardEvents[typeof type]),
+      },
+      options.embeds,
+    );
     for (const make of options.overlays ?? []) {
       this.overlays.push(make({ root: this.overlayRoot, store: this.store, stage }));
     }
@@ -182,11 +197,13 @@ export class Corkboard {
     this.cleanups.push(
       stage.onFrame((camChanged) => {
         this.videoLayer.onFrame(camChanged);
+        this.embeds.onFrame(camChanged);
         for (const o of this.overlays) o.onFrame?.(camChanged);
         if (camChanged) this.emitter.emit('camera', { camera: { ...stage.cam.cam } });
       }),
       stage.onSettle(() => {
         this.videoLayer.onSettle();
+        this.embeds.onSettle();
         for (const o of this.overlays) o.onSettle?.();
         this.emitter.emit('cameraSettled', { camera: { ...stage.cam.cam } });
       }),
@@ -226,8 +243,15 @@ export class Corkboard {
           const el = id ? this.store.get(id) : undefined;
           this.videoLayer.setHover(el && el.media.video ? el.id : null);
         }),
-        it.events.on('selection', ({ ids }) => this.videoLayer.setSelection(ids)),
-        it.events.on('touch', ({ touch }) => this.videoLayer.setTouch(touch)),
+        it.events.on('selection', ({ ids }) => {
+          this.videoLayer.setSelection(ids);
+          this.embeds.setSelection(ids);
+        }),
+        it.events.on('touch', ({ touch }) => {
+          this.videoLayer.setTouch(touch);
+          this.embeds.setTouch(touch);
+        }),
+        it.events.on('dblclick', ({ id }) => this.embeds.onDblClick(id)),
       );
     } else {
       this.interaction = null;
@@ -331,6 +355,7 @@ export class Corkboard {
   // ── Settings ───────────────────────────────────────────────────────────────
   setTheme(theme: Theme | 'dark' | 'light'): void {
     this.stage.setTheme(themeOf(theme));
+    this.embeds.setTheme();
   }
 
   setGrid(on: boolean): void {
@@ -363,6 +388,11 @@ export class Corkboard {
     this.videoLayer.setPaused(paused);
   }
 
+  // Embed cards: live iframe limits (`maxLive`, `maxLiveTouch`, `minLivePx`) can change at any time.
+  setEmbeds(o: EmbedOptions): void {
+    this.embeds.setOptions(o);
+  }
+
   // ── Events ─────────────────────────────────────────────────────────────────
   on<K extends keyof CorkboardEvents>(type: K, fn: (payload: CorkboardEvents[K]) => void): () => void {
     return this.emitter.on(type, fn);
@@ -375,7 +405,11 @@ export class Corkboard {
   // ── Diagnostics ────────────────────────────────────────────────────────────
   // Render loop counters and timings (rAF callbacks, mounted views, texture memory, percentiles).
   stats(): Record<string, unknown> {
-    return this.stage.stats();
+    return {
+      ...this.stage.stats(),
+      embedsLive: this.embeds.live.size,
+      embedsMaxLive: this.embeds.maxLive,
+    };
   }
 
   // Bounding box of a card on screen, in host-local px (for HTML UI pinned to a card).
@@ -394,6 +428,7 @@ export class Corkboard {
     this.interaction?.dispose();
     for (const f of this.cleanups) f();
     this.videoLayer.dispose();
+    this.embeds.dispose();
     for (const o of this.overlays) o.dispose();
     this.overlayRoot.remove();
     this.stage.dispose();
