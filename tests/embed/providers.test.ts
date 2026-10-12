@@ -175,8 +175,48 @@ describe('generic', () => {
   });
 });
 
+describe('vimeo hash', () => {
+  it('keeps only a hex `h` and builds the query itself', () => {
+    expect(parseEmbedUrl('https://player.vimeo.com/video/76979871?h=abc12345&autoplay=1')?.iframeSrc).toBe(
+      'https://player.vimeo.com/video/76979871?h=abc12345',
+    );
+    const bad = parseEmbedUrl('https://player.vimeo.com/video/76979871?h=a%26autoplay%3D1%23x');
+    expect(bad?.iframeSrc).toBe('https://player.vimeo.com/video/76979871');
+    expect(parseEmbedUrl('https://vimeo.com/76979871?h=zz9')?.iframeSrc).toBe('https://player.vimeo.com/video/76979871');
+  });
+});
+
 describe('providerOfIframeSrc', () => {
-  it('goes by the serving host, not by the path or the query', () => {
+  it('allowlists exactly the embed URLs the parsers emit, for every provider', () => {
+    for (const u of [
+      'https://youtu.be/dQw4w9WgXcQ',
+      'https://vimeo.com/76979871/abcdef1234',
+      'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC',
+      'https://codepen.io/team/acme/pen/AbCdEf',
+      'https://codepen.io/user/pen/AbCdEf',
+      'https://www.figma.com/design/abc/Name',
+    ]) {
+      const p = parseEmbedUrl(u);
+      expect(p && providerOfIframeSrc(p.iframeSrc), u).toBe(p?.provider);
+      expect(p?.provider).not.toBe('generic');
+    }
+  });
+  it('does not give the sandbox of a provider to its other pages', () => {
+    for (const u of [
+      'https://www.youtube.com/redirect?q=https://evil.example',
+      'https://www.youtube.com/embed/dQw4w9WgXcQ',
+      'https://youtube.com/embed/dQw4w9WgXcQ',
+      'https://www.youtube-nocookie.com/redirect?q=x',
+      'https://player.vimeo.com/api/x',
+      'https://open.spotify.com/user/x',
+      'https://codepen.io/user/pen/AbCdEf',
+      'https://www.figma.com/file/abc',
+      'http://player.vimeo.com/video/1',
+    ]) {
+      expect(providerOfIframeSrc(u), u).toBe('generic');
+    }
+  });
+  it('goes by the serving host, not by the query', () => {
     expect(providerOfIframeSrc('https://www.youtube-nocookie.com/embed/x')).toBe('youtube');
     expect(providerOfIframeSrc('https://player.vimeo.com/video/1')).toBe('vimeo');
     expect(providerOfIframeSrc('https://evil.example/?u=https://www.youtube.com/')).toBe('generic');

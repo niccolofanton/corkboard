@@ -100,10 +100,13 @@ function parseVimeo(u: URL, host: string): Omit<ParsedEmbed, 'url' | 'host' | 'l
   const id = parts[i];
   // An unlisted video carries a hash: `vimeo.com/ID/HASH` or `?h=HASH`.
   const next = parts[i + 1];
-  const hash = u.searchParams.get('h') ?? (next && /^[0-9a-f]{8,}$/i.test(next) ? next : null);
+  // Only hex goes into the iframe URL: `?h=abc&autoplay=1` or anything else a link carries is dropped.
+  const q = u.searchParams.get('h');
+  const hash = q !== null && /^[0-9a-f]+$/i.test(q) ? q : next && /^[0-9a-f]{8,}$/i.test(next) ? next : null;
   return {
     provider: 'vimeo',
-    iframeSrc: `https://player.vimeo.com/video/${id}` + (hash ? `?h=${hash}` : ''),
+    iframeSrc:
+      `https://player.vimeo.com/video/${id}` + (hash ? `?${new URLSearchParams({ h: hash }).toString()}` : ''),
     aspect: 9 / 16,
     posters: [],
   };
@@ -183,21 +186,23 @@ export function parseEmbedUrl(raw: string): ParsedEmbed | null {
   };
 }
 
-// The provider that SERVES an iframe URL, by its host. The sandbox profile follows this and never what a
-// card claims, so a resolver (or a tampered board) cannot name an arbitrary page "youtube".
-const ALLOWLIST: Record<string, EmbedProvider> = {
-  'www.youtube-nocookie.com': 'youtube',
-  'www.youtube.com': 'youtube',
-  'youtube.com': 'youtube',
-  'player.vimeo.com': 'vimeo',
-  'open.spotify.com': 'spotify',
-  'codepen.io': 'codepen',
-  'www.figma.com': 'figma',
-};
+// The provider that SERVES an iframe URL, by its host and path. The sandbox profile follows this and never
+// what a card claims, so a resolver (or a tampered board) cannot name an arbitrary page "youtube". Only the
+// embed URLs the parsers above emit are listed: the same host's other paths (`youtube.com/redirect?q=...`)
+// are arbitrary pages.
+const ALLOWLIST: readonly { host: string; path: RegExp; provider: EmbedProvider }[] = [
+  { host: 'www.youtube-nocookie.com', path: /^\/embed\//, provider: 'youtube' },
+  { host: 'player.vimeo.com', path: /^\/video\//, provider: 'vimeo' },
+  { host: 'open.spotify.com', path: /^\/embed\//, provider: 'spotify' },
+  { host: 'codepen.io', path: /^\/(?:team\/)?[^/]+\/embed\//, provider: 'codepen' },
+  { host: 'www.figma.com', path: /^\/embed$/, provider: 'figma' },
+];
 
 export function providerOfIframeSrc(src: string): EmbedProvider {
   try {
-    return ALLOWLIST[new URL(src).hostname] ?? 'generic';
+    const u = new URL(src);
+    if (u.protocol !== 'https:') return 'generic';
+    return ALLOWLIST.find((r) => r.host === u.hostname && r.path.test(u.pathname))?.provider ?? 'generic';
   } catch {
     return 'generic';
   }
