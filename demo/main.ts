@@ -116,11 +116,11 @@ function resolveEmbed(url: string): EmbedInfo | null {
   return null;
 }
 
-// Two rows of embeds, 480 px wide, above the grid.
+// Rows of embeds, 480 px wide, above the grid.
 function placeEmbeds(board: Corkboard): void {
   const b = board.bounds();
   const gap = 28;
-  const perRow = 5;
+  const perRow = 4;
   const ids = board.add(EMBEDS.map((init) => ({ ...init, x: 0, y: 0, w: EMBED_W })));
   const heights = ids.map((id) => board.get(id)?.h ?? 270);
   const rowHeight = (row: number): number =>
@@ -129,8 +129,18 @@ function placeEmbeds(board: Corkboard): void {
   let y = b.y0 - gap;
   for (let r = rows - 1; r >= 0; r--) y -= rowHeight(r) + (r === rows - 1 ? 0 : gap);
   for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < perRow && r * perRow + c < ids.length; c++) {
+    const count = Math.min(perRow, ids.length - r * perRow);
+    for (let c = 0; c < count; c++) {
       board.update(ids[r * perRow + c], { x: b.x0 + c * (EMBED_W + gap), y });
+    }
+    // A video card takes the free slot at the end of the last row: a clip playing beside the embeds.
+    if (r === rows - 1 && count < perRow) {
+      board.add({
+        media: { src: picsum(9001, 480, 0.5625), video: VIDEOS[2], aspect: 0.5625 },
+        x: b.x0 + count * (EMBED_W + gap),
+        y,
+        w: EMBED_W,
+      });
     }
     y += rowHeight(r) + gap;
   }
