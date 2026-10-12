@@ -541,11 +541,14 @@ export class EmbedLayer {
       if (!el || !entry.ready) continue;
       const r = this.stage.previewRectOf(id) ?? el;
       const b = elementBox({ x: r.x, y: r.y, w: r.w, h: r.h, rot: r.rot });
+      // The part of the card that is in view: a neighbour with a sliver showing is not worth an iframe.
+      const visW = (Math.min(b.maxX, view.x1) - Math.max(b.minX, view.x0)) * k;
+      const visH = (Math.min(b.maxY, view.y1) - Math.max(b.minY, view.y0)) * k;
       out.push({
         id,
-        screenW: r.w * k,
-        screenH: r.h * k,
-        onScreen: b.maxX >= view.x0 && b.minX <= view.x1 && b.maxY >= view.y0 && b.minY <= view.y1,
+        screenW: Math.min(r.w * k, visW),
+        screenH: Math.min(r.h * k, visH),
+        onScreen: visW >= 0 && visH >= 0,
         selected: this.selected.has(id),
         interacting: this.interactId === id,
         frameable: entry.spec !== null,
@@ -583,7 +586,6 @@ export class EmbedLayer {
     iframe.setAttribute('allow', spec.allow);
     iframe.setAttribute('referrerpolicy', spec.referrerPolicy);
     iframe.setAttribute('loading', spec.loading);
-    if (spec.allowFullscreen) iframe.setAttribute('allowfullscreen', '');
     if (spec.srcdoc !== undefined) iframe.srcdoc = spec.srcdoc;
     else if (spec.src !== undefined) iframe.src = spec.src;
     const frame: Frame = { wrapper, iframe, loaded: false, w: NaN, h: NaN, transform: '', z: NaN };

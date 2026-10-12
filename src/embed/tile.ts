@@ -164,24 +164,31 @@ export function paintTile(ctx: Ctx, w: number, h: number, spec: TileSpec, theme:
   const fg = dark ? hsl(30, 88) : hsl(50, 24);
   const dim = dark ? hsl(20, 70) : hsl(30, 38);
 
-  const pad = Math.round(Math.min(w, h) * 0.08);
-  const glyph = Math.round(Math.min(w, h) * 0.3);
-  drawGlyph(ctx, spec.glyph, w / 2, h * 0.38, glyph, cssHex(theme.accent));
-
+  // One centred group: glyph, label, title. Sizes follow the tile's width, so text reads at card size.
+  const pad = Math.round(w * 0.06);
+  const glyph = Math.round(Math.min(w * 0.2, h * 0.34));
+  const labelPx = Math.round(w * 0.04);
+  const titlePx = Math.round(w * 0.055);
   ctx.textBaseline = 'alphabetic';
   ctx.textAlign = 'center';
+  ctx.font = `600 ${titlePx}px ${FONT}`;
+  const lines = spec.title === '' ? [] : wrap(ctx, spec.title, w - pad * 2, h < 260 ? 1 : 2);
+  const gap = Math.round(glyph * 0.28);
+  const groupH =
+    glyph + gap + labelPx + (lines.length > 0 ? Math.round(titlePx * 0.5) + lines.length * titlePx * 1.2 : 0);
+  let y = Math.max(pad * 0.5, (h - groupH) / 2);
+  drawGlyph(ctx, spec.glyph, w / 2, y + glyph / 2, glyph, cssHex(theme.accent));
+  y += glyph + gap + labelPx;
   ctx.fillStyle = dim;
-  ctx.font = `600 ${Math.round(h * 0.055)}px ${FONT}`;
-  ctx.fillText(spec.label.toUpperCase(), w / 2, h * 0.38 + glyph * 0.5 + h * 0.1, w - pad * 2);
-  if (spec.title !== '') {
+  ctx.font = `700 ${labelPx}px ${FONT}`;
+  ctx.fillText(spec.label.toUpperCase(), w / 2, y, w - pad * 2);
+  if (lines.length > 0) {
     ctx.fillStyle = fg;
-    const size = Math.round(h * 0.075);
-    ctx.font = `600 ${size}px ${FONT}`;
-    const lines = wrap(ctx, spec.title, w - pad * 2, 2);
-    let y = h * 0.38 + glyph * 0.5 + h * 0.1 + size * 1.5;
+    ctx.font = `600 ${titlePx}px ${FONT}`;
+    y += Math.round(titlePx * 0.5);
     for (const l of lines) {
-      ctx.fillText(l, w / 2, y, w - pad * 2);
-      y += size * 1.25;
+      y += titlePx * 1.2;
+      ctx.fillText(l, w / 2, y - titlePx * 0.2, w - pad * 2);
     }
   }
 }

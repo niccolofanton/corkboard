@@ -17,7 +17,7 @@ export const KEEP_FACTOR = 0.6;
 
 export interface PolicyCard {
   id: string;
-  // CSS px on screen.
+  // CSS px on screen: the part of the card that is in view.
   screenW: number;
   screenH: number;
   onScreen: boolean;

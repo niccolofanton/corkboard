@@ -42,9 +42,9 @@ export interface IframeSpec {
   src?: string;
   srcdoc?: string;
   sandbox: string;
-  // The Permissions-Policy `allow` attribute. Empty: nothing delegated.
+  // The Permissions-Policy `allow` attribute (it also covers fullscreen: no `allowfullscreen` attribute).
+  // Empty: nothing delegated.
   allow: string;
-  allowFullscreen: boolean;
   referrerPolicy: typeof REFERRER_POLICY;
   loading: 'lazy';
   title: string;
@@ -86,8 +86,7 @@ export function iframeSpecFor(input: IframeInput): IframeSpec | null {
       srcdoc: snippetDocument(source.html),
       sandbox: SANDBOX_SNIPPET,
       allow: '',
-      allowFullscreen: false,
-      referrerPolicy: REFERRER_POLICY,
+        referrerPolicy: REFERRER_POLICY,
       loading: 'lazy',
       title,
     };
@@ -108,7 +107,6 @@ export function iframeSpecFor(input: IframeInput): IframeSpec | null {
     src,
     sandbox,
     allow,
-    allowFullscreen: allow.includes('fullscreen'),
     referrerPolicy: REFERRER_POLICY,
     loading: 'lazy',
     title,

@@ -29,14 +29,13 @@ describe('iframeSpecFor', () => {
       src: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
       referrerPolicy: 'strict-origin-when-cross-origin',
       loading: 'lazy',
-      allowFullscreen: true,
     });
     expect(s?.allow).toBe('autoplay; encrypted-media; fullscreen; picture-in-picture');
   });
 
   it('gives an arbitrary URL the profile without presentation and an empty allow list', () => {
     const s = iframeSpecFor({ source: { url: 'https://en.wikipedia.org/wiki/Moodboard' } });
-    expect(s).toMatchObject({ profile: 'arbitrary', sandbox: SANDBOX_ARBITRARY, allow: '', allowFullscreen: false });
+    expect(s).toMatchObject({ profile: 'arbitrary', sandbox: SANDBOX_ARBITRARY, allow: '' });
     expect(s?.sandbox).not.toContain('allow-presentation');
     expect(s?.sandbox).toContain('allow-same-origin');
   });
