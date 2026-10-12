@@ -15,6 +15,9 @@ export {
   ambientAllowed,
   browserAmbientEnv,
   AMBIENT_MAX_STREAMS,
+  AMBIENT_MAX_PLAYING,
+  AMBIENT_MAX_PLAYING_TOUCH,
+  AMBIENT_MIN_PLAY_PX,
   AMBIENT_MARGIN,
 } from './ambientPolicy';
 export type { AmbientCandidate, AmbientPlanInput, AmbientEnv } from './ambientPolicy';

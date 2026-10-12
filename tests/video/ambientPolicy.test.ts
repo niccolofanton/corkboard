@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AMBIENT_MAX_PLAYING,
   AMBIENT_MAX_STREAMS,
+  AMBIENT_MIN_PLAY_PX,
   ambientAllowed,
   planAmbient,
   type AmbientCandidate,
@@ -44,22 +46,31 @@ describe('planAmbient: which cards play', () => {
     expect(plan(cards, { camera: { tx: -4900, ty: 0, scale: 1 } })).toEqual(['z']);
   });
 
-  it('has no size threshold: a card in view plays at any zoom, however small on screen', () => {
-    const cards = [card('a', 100, 100, 300, 300)];
-    for (const scale of [1, 0.3, 0.1, 0.02, 0.005]) {
-      expect(plan(cards, { camera: { tx: 0, ty: 0, scale } }), `zoom ${scale}`).toEqual(['a']);
-    }
+  it('has a minimum on-screen size on the long side: a card too small at this zoom does not play', () => {
+    const cards = [card('a', 100, 100, 300, 120)];
+    expect(AMBIENT_MIN_PLAY_PX).toBe(160);
+    // 300 px wide: plays down to a zoom of 160 / 300.
+    expect(plan(cards, { camera: { tx: 0, ty: 0, scale: 0.54 } })).toEqual(['a']);
+    expect(plan(cards, { camera: { tx: 0, ty: 0, scale: 0.53 } })).toEqual([]);
+    for (const scale of [0.3, 0.1, 0.02]) expect(plan(cards, { camera: { tx: 0, ty: 0, scale } })).toEqual([]);
+    // The long side counts, not the width: a tall card.
+    expect(plan([card('t', 0, 0, 40, 200)])).toEqual(['t']);
+    // The threshold is an option, and 0 lifts it.
+    expect(plan(cards, { camera: { tx: 0, ty: 0, scale: 0.1 }, minPlayPx: 20 })).toEqual(['a']);
+    expect(plan(cards, { camera: { tx: 0, ty: 0, scale: 0.01 }, minPlayPx: 0 })).toEqual(['a']);
   });
 
-  it('plays every card of a zoomed-out canvas: 400 tiny cards in view, up to the ceiling', () => {
+  it('plays nothing on a zoomed-out canvas, like the 60 playing at 10 % that this replaces', () => {
     const many = Array.from({ length: 400 }, (_, i) =>
       card(`c${String(i).padStart(3, '0')}`, (i % 20) * 220, Math.floor(i / 20) * 220, 200, 200),
     );
-    // 20 x 20 cards of 200 px at 0.1: a 440 x 440 px patch of the 1000 x 800 viewport.
+    // 20 x 20 cards of 200 px at 0.1: 20 px on screen.
     const camera = { tx: 0, ty: 0, scale: 0.1 };
-    expect(plan(many.slice(0, 40), { camera })).toHaveLength(40);
-    expect(plan(many.slice(0, 96), { camera })).toHaveLength(96);
-    expect(plan(many, { camera })).toHaveLength(AMBIENT_MAX_STREAMS);
+    expect(plan(many, { camera })).toEqual([]);
+    // Zoomed in enough for the size, the cap is what limits it.
+    expect(plan(many, { camera: { tx: 0, ty: 0, scale: 0.9 } })).toHaveLength(AMBIENT_MAX_PLAYING);
+    // Both limits lifted, only the absolute ceiling is left.
+    expect(plan(many, { camera, minPlayPx: 0, cap: 1000 })).toHaveLength(AMBIENT_MAX_STREAMS);
   });
 
   it('plays nothing without a viewport or with a ceiling of zero', () => {
@@ -82,9 +93,11 @@ describe('planAmbient: the safety ceiling', () => {
       card(`c${String(i).padStart(2, '0')}`, (i % 5) * 200, Math.floor(i / 5) * 200),
     );
 
-  it('plays every card in view when there are few (no per-device cap)', () => {
-    expect(plan(grid(20))).toHaveLength(20);
+  it('plays at most 8 by default, and every card when there are fewer', () => {
+    expect(AMBIENT_MAX_PLAYING).toBe(8);
+    expect(plan(grid(20))).toHaveLength(8);
     expect(plan(grid(3))).toHaveLength(3);
+    expect(plan(grid(20), { cap: 20 })).toHaveLength(20);
   });
 
   it('never plays more than the ceiling it is given', () => {
@@ -96,7 +109,7 @@ describe('planAmbient: the safety ceiling', () => {
   it('never lets a card in the margin take the place of a card in view', () => {
     const inView = Array.from({ length: 5 }, (_, i) => card(`v${i}`, i * 150, 0, 140, 140));
     const margin = Array.from({ length: 5 }, (_, i) => card(`m${i}`, 1010 + i * 50, 0, 600, 600));
-    const ids = plan([...margin, ...inView], { cap: 5 });
+    const ids = plan([...margin, ...inView], { cap: 5, minPlayPx: 0 });
     expect(ids.sort()).toEqual(['v0', 'v1', 'v2', 'v3', 'v4']);
   });
 
@@ -110,7 +123,7 @@ describe('planAmbient: the safety ceiling', () => {
   });
 
   it('prefers cards in the viewport to cards only in the margin, whatever their size', () => {
-    const cards = [card('margin', 1050, 0, 600, 600), card('in', 10, 10, 120, 120)];
+    const cards = [card('margin', 1050, 0, 600, 600), card('in', 10, 10, 180, 180)];
     expect(plan(cards, { cap: 1 })).toEqual(['in']);
     expect(plan(cards, { cap: 2 })).toEqual(['in', 'margin']);
   });
@@ -121,6 +134,12 @@ describe('planAmbient: the safety ceiling', () => {
     expect(plan(cards, { cap: 1, playing: new Set(['a']) })).toEqual(['a']);
     const better = [card('a', 0, 0, 200, 200), card('b', 300, 0, 400, 400)];
     expect(plan(better, { cap: 1, playing: new Set(['a']) })).toEqual(['b']);
+  });
+
+  it('breaks a tie between equal cards by the distance to the centre of the view', () => {
+    // 200 px cards, all fully in view: the two nearest the centre (500, 400) win.
+    const cards = [card('corner', 0, 0), card('mid', 400, 300), card('near', 500, 300), card('edge', 800, 600)];
+    expect(plan(cards, { cap: 2 })).toEqual(['mid', 'near']);
   });
 
   it('does not depend on the order the cards arrive in', () => {

@@ -1,19 +1,20 @@
 // Which video cards play on their own in `mode: 'always'` (ambient.ts)? Pure rules shared by the pool
 // and its tests. No DOM, no timers.
 //
-// "Always" means every video card on screen plays, at any zoom: there is no size threshold and no
-// per-device cap on what the viewport shows. Only the cards that touch the viewport (plus a margin, so a
-// card scrolling in is already moving) have a stream; a card that scrolls away is let go of.
-//
-// The one limit is a safety ceiling (`AMBIENT_MAX_STREAMS`): a <video> is a decoder and a socket, and a
-// canvas of hundreds of video cards zoomed all the way out must not open hundreds of them. Past it the
-// cards in view win over the ones in the margin, the biggest on screen first.
+// A card plays only when it is worth a stream: it touches the viewport (plus a margin, so a card scrolling
+// in is already moving) AND it is big enough on screen (`minPlayPx`, on its long side: a 20 px card at 10 %
+// zoom shows nothing a thumbnail does not). Of those, at most `cap` play at once (8 on a mouse device, 2 on
+// touch): a <video> is a decoder and a socket, and a screenful of them is what stalls a laptop. The biggest
+// and most central win. A card that stays in the set keeps its stream; one that leaves is let go of.
 import type { Camera } from '../math';
 import { DEG } from '../interact/geometry';
 
-// Streams that may run at once, whatever the canvas shows: a ceiling against a runaway canvas, well past
-// what a person puts on one screen.
+// Streams that may run at once, whatever the options say: a ceiling against a runaway `maxPlaying`.
 export const AMBIENT_MAX_STREAMS = 96;
+// Defaults of `video.maxPlaying` / `video.maxPlayingTouch` and `video.minPlayPx`.
+export const AMBIENT_MAX_PLAYING = 8;
+export const AMBIENT_MAX_PLAYING_TOUCH = 2;
+export const AMBIENT_MIN_PLAY_PX = 160;
 // How far past the viewport (fraction of its size, each side) a card still plays.
 export const AMBIENT_MARGIN = 0.25;
 // Over the ceiling, a card that already plays keeps its seat unless another is clearly better: two
@@ -34,8 +35,11 @@ export interface AmbientPlanInput {
   cards: Iterable<AmbientCandidate>;
   camera: Camera;
   viewport: { w: number; h: number };
-  // At most this many ids (default `AMBIENT_MAX_STREAMS`).
+  // At most this many ids (default `AMBIENT_MAX_PLAYING`, never past `AMBIENT_MAX_STREAMS`).
   cap?: number;
+  // A card plays only if its long side is at least this many CSS px on screen (default
+  // `AMBIENT_MIN_PLAY_PX`; 0 = any size).
+  minPlayPx?: number;
   // Ids that play now (they keep their seat on a near tie).
   playing?: ReadonlySet<string>;
   margin?: number;
@@ -82,13 +86,14 @@ const overlap = (a: ScreenBox, b: ScreenBox): number => {
   return w > 0 && h > 0 ? w * h : 0;
 };
 
-// The ids that should play, best first: every card in the viewport (by the area it shows), then the ones
-// only in the margin (by their size), up to the ceiling. Ties break on the id, so the answer does not
-// depend on the order the cards arrive in.
+// The ids that should play, best first: the big enough cards in the viewport (by the area they show, then
+// the nearest to the centre), then the ones only in the margin (by their size), up to the cap. Ties break
+// on the id, so the answer does not depend on the order the cards arrive in.
 export function planAmbient(input: AmbientPlanInput): string[] {
   const { camera, viewport } = input;
-  const cap = input.cap ?? AMBIENT_MAX_STREAMS;
-  if (cap <= 0 || viewport.w <= 0 || viewport.h <= 0) return [];
+  const cap = Math.min(input.cap ?? AMBIENT_MAX_PLAYING, AMBIENT_MAX_STREAMS);
+  if (!(cap > 0) || viewport.w <= 0 || viewport.h <= 0) return [];
+  const minPx = input.minPlayPx ?? AMBIENT_MIN_PLAY_PX;
   const m = input.margin ?? AMBIENT_MARGIN;
   const view: ScreenBox = { x0: 0, y0: 0, x1: viewport.w, y1: viewport.h };
   const near: ScreenBox = {
@@ -97,8 +102,11 @@ export function planAmbient(input: AmbientPlanInput): string[] {
     x1: viewport.w * (1 + m),
     y1: viewport.h * (1 + m),
   };
-  const scored: { id: string; inView: boolean; score: number }[] = [];
+  const cx = viewport.w / 2;
+  const cy = viewport.h / 2;
+  const scored: { id: string; inView: boolean; score: number; dist: number }[] = [];
   for (const c of input.cards) {
+    if (Math.max(c.w, c.h) * camera.scale < minPx) continue;
     const box = screenBox(c, camera);
     const visible = overlap(box, view);
     const inView = visible > 0;
@@ -106,12 +114,14 @@ export function planAmbient(input: AmbientPlanInput): string[] {
     const size = (box.x1 - box.x0) * (box.y1 - box.y0);
     let score = inView ? visible : size;
     if (input.playing?.has(c.id)) score *= KEEP_BONUS;
-    scored.push({ id: c.id, inView, score });
+    const dist = Math.hypot((box.x0 + box.x1) / 2 - cx, (box.y0 + box.y1) / 2 - cy);
+    scored.push({ id: c.id, inView, score, dist });
   }
   scored.sort(
     (a, b) =>
       Number(b.inView) - Number(a.inView) ||
       b.score - a.score ||
+      a.dist - b.dist ||
       (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
   return (scored.length > cap ? scored.slice(0, cap) : scored).map((s) => s.id);

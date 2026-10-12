@@ -26,6 +26,13 @@ export interface VideoOptions {
   // Mute the videos (default true). Only a hovered / selected card can play with sound, and only in a
   // page that has had a user gesture (autoplay policy).
   muted?: boolean;
+  // `mode: 'always'`: a card plays on its own only if its long side is at least this many CSS px on screen
+  // (default 160). Smaller ones stay a thumbnail.
+  minPlayPx?: number;
+  // `mode: 'always'`: at most this many cards play at once on a mouse / pen device (default 8) ...
+  maxPlaying?: number;
+  // ... and on a touch device (default 2). The biggest and most central cards win.
+  maxPlayingTouch?: number;
 }
 
 export interface VideoLayerDeps {
@@ -96,7 +103,14 @@ export class VideoLayer {
     this.muted = o.muted ?? this.muted;
     this.overlay.setPlayback({ loop: this.loop, muted: this.muted });
     this.controller.setEnabled(mode !== 'off');
-    this.ambient.setOptions({ always: mode === 'always', loop: this.loop, muted: this.muted });
+    this.ambient.setOptions({
+      always: mode === 'always',
+      loop: this.loop,
+      muted: this.muted,
+      minPlayPx: o.minPlayPx,
+      maxPlaying: o.maxPlaying,
+      maxPlayingTouch: o.maxPlayingTouch,
+    });
   }
 
   get playing(): ReadonlySet<ElementId> {
@@ -118,6 +132,7 @@ export class VideoLayer {
   // A finger has no hover and no selection playback.
   setTouch(touch: boolean): void {
     this.controller.setTouch(touch);
+    this.ambient.setTouch(touch);
   }
 
   // Pauses every stream (a lightbox over the canvas, say).

@@ -107,8 +107,19 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-const on = (over: Partial<{ always: boolean; loop: boolean; muted: boolean }> = {}): void =>
-  pool.setOptions({ always: true, loop: true, muted: true, ...over });
+// The pool with its limits lifted (any size, up to the ceiling): the mechanics below do not depend on them.
+// The limits themselves are under 'the default limits'.
+const on = (over: Partial<Parameters<AmbientVideos['setOptions']>[0]> = {}): void =>
+  pool.setOptions({
+    always: true,
+    loop: true,
+    muted: true,
+    minPlayPx: 0,
+    maxPlaying: AMBIENT_MAX_STREAMS,
+    maxPlayingTouch: AMBIENT_MAX_STREAMS,
+    ...over,
+  });
+const onDefaults = (): void => pool.setOptions({ always: true, loop: true, muted: true });
 
 describe('AmbientVideos: switched off (the default)', () => {
   it('plays nothing and creates no element', () => {
@@ -304,7 +315,7 @@ describe('AmbientVideos: only what is in view plays', () => {
   });
 });
 
-describe('AmbientVideos: every card in view plays', () => {
+describe('AmbientVideos: every card in view plays (limits lifted)', () => {
   it('plays all of them, however many: no cap on what is on screen', () => {
     addCards(40, 0, 100);
     on();
@@ -376,6 +387,52 @@ describe('AmbientVideos: every card in view plays', () => {
     fadeOut();
     expect(withSrc()).toHaveLength(0);
     expect(videos().length).toBeLessThanOrEqual(MAX_IDLE);
+  });
+});
+
+describe('AmbientVideos: the default limits', () => {
+  it('never plays more than 8 cards, the biggest on screen first, however many are in view', () => {
+    addCards(30, 0, 200);
+    cards.set('big', { x: 100, y: 100, w: 400, h: 400, src: '/media/big.mp4' });
+    onDefaults();
+    settle();
+    expect(pool.playingIds.size).toBe(8);
+    expect(withSrc()).toHaveLength(8);
+    expect(pool.isPlaying('big')).toBe(true);
+  });
+
+  it('plays nothing zoomed out until a card is 160 px on screen, whatever the zoom', () => {
+    addCards(25, 0, 400);
+    camera = { tx: 0, ty: 0, scale: 0.1 }; // 390 px cards -> 39 px
+    onDefaults();
+    settle();
+    expect(pool.playingIds.size).toBe(0);
+    expect(videos()).toHaveLength(0);
+    camera = { tx: 0, ty: 0, scale: 0.45 }; // 390 px -> 175 px
+    pool.settle();
+    settle();
+    expect(pool.playingIds.size).toBe(8);
+  });
+
+  it('allows 2 on a touch device, and honours the options', () => {
+    addCards(30, 0, 200);
+    onDefaults();
+    settle();
+    expect(pool.playingIds.size).toBe(8);
+    pool.setTouch(true);
+    settle();
+    fadeOut();
+    expect(pool.playingIds.size).toBe(2);
+    pool.setOptions({ always: true, loop: true, muted: true, maxPlayingTouch: 3, minPlayPx: 500 });
+    settle();
+    expect(pool.playingIds.size).toBe(0); // 190 px cards < 500 px
+    pool.setOptions({ always: true, loop: true, muted: true, minPlayPx: 100 });
+    settle();
+    expect(pool.playingIds.size).toBe(3);
+    pool.setTouch(false);
+    pool.setOptions({ always: true, loop: true, muted: true, maxPlaying: 5 });
+    settle();
+    expect(pool.playingIds.size).toBe(5);
   });
 });
 

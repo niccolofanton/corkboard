@@ -5,10 +5,10 @@
 // plays a card after HOVER_DELAY_MS, a single selected card plays at once.
 //
 // Rules (a <video> is a decoder, and a canvas may hold hundreds of video cards):
-//   - EVERY card that touches the viewport plays, at any zoom (ambientPolicy.ts): no size threshold and
-//     no cap on what is on screen. The cards past the viewport's margin have no element at all, so nothing
-//     is fetched or decoded for them: their thumbnail is all there is. A safety ceiling
-//     (`AMBIENT_MAX_STREAMS`) guards against a runaway canvas.
+//   - Only the cards that touch the viewport, are at least `minPlayPx` on screen (long side) and make the
+//     cut of `maxPlaying` (8, or 2 on touch; the biggest and most central win) play (ambientPolicy.ts).
+//     The others have no element at all, so nothing is fetched or decoded for them: their thumbnail is
+//     all there is.
 //   - A card that leaves the set is paused and its file let go of; its element is reused by the next
 //     card (a pan creates no elements once the pool has grown to the screen). The set is re-planned when
 //     the camera settles and, throttled, while it moves, so a card scrolling in starts a moment before
@@ -23,6 +23,9 @@
 import type { Camera } from '../math';
 import { VideoOverlay, type VideoTarget } from './video';
 import {
+  AMBIENT_MAX_PLAYING,
+  AMBIENT_MAX_PLAYING_TOUCH,
+  AMBIENT_MIN_PLAY_PX,
   ambientAllowed,
   browserAmbientEnv,
   planAmbient,
@@ -82,6 +85,10 @@ export class AmbientVideos {
   private soundMuted = true;
   private paused = false;
   private suspended = false;
+  private touch = false;
+  private minPlayPx = AMBIENT_MIN_PLAY_PX;
+  private maxPlaying = AMBIENT_MAX_PLAYING;
+  private maxPlayingTouch = AMBIENT_MAX_PLAYING_TOUCH;
   private excluded: string | null = null;
   private lastPlan = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -130,13 +137,30 @@ export class AmbientVideos {
 
   // The switches: `always` turns the pool on, `loop` and `muted` are the playback options (the pool's own elements are muted whatever `muted` says: it only tells whether the hover overlay is
   // redundant).
-  setOptions(o: { always: boolean; loop: boolean; muted: boolean }): void {
+  setOptions(o: {
+    always: boolean;
+    loop: boolean;
+    muted: boolean;
+    minPlayPx?: number;
+    maxPlaying?: number;
+    maxPlayingTouch?: number;
+  }): void {
     if (this.disposed) return;
+    if (o.minPlayPx !== undefined) this.minPlayPx = o.minPlayPx;
+    if (o.maxPlaying !== undefined) this.maxPlaying = o.maxPlaying;
+    if (o.maxPlayingTouch !== undefined) this.maxPlayingTouch = o.maxPlayingTouch;
     const loopChanged = o.loop !== this.loop;
     this.loop = o.loop;
     this.soundMuted = o.muted;
     this.on = o.always;
     if (loopChanged) for (const v of [...this.active.values(), ...this.idle]) this.configure(v);
+    this.replan();
+  }
+
+  // A finger (true) or a mouse / pen: the pool is smaller on touch.
+  setTouch(touch: boolean): void {
+    if (touch === this.touch || this.disposed) return;
+    this.touch = touch;
     this.replan();
   }
 
@@ -266,6 +290,8 @@ export class AmbientVideos {
         camera: this.deps.camera(),
         viewport: this.deps.viewport(),
         playing: new Set(this.active.keys()),
+        cap: this.touch ? this.maxPlayingTouch : this.maxPlaying,
+        minPlayPx: this.minPlayPx,
       });
       for (const id of ids) {
         const t = this.deps.target(id);
