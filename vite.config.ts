@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 // Library build: ES + CJS bundles in dist/. pixi.js, rbush and thumbhash stay external (dependencies).
 // The decode worker is emitted as its own chunk and referenced with `new URL(..., import.meta.url)`.
 export default defineConfig({
+  base: './',
   build: {
     lib: {
       entry: 'src/index.ts',

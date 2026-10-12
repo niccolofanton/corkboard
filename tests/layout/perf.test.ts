@@ -137,7 +137,6 @@ describe('layout performance', () => {
       const y = rnd() * 5000;
       return {
         id: `c${i}`,
-        kind: 'post',
         box: { minX: x, minY: y, maxX: x + w, maxY: y + h },
         w,
         h,
