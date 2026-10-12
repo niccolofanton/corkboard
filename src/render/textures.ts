@@ -407,8 +407,10 @@ export class TextureManager {
 
   private onWorker(wi: number, m: WorkerOut): void {
     const req = this.reqs.get(m.rid);
-    this.workerLoad[wi] = Math.max(0, this.workerLoad[wi] - 1);
     if (req) {
+      // Only a request still on the books was counted in: after reset() the load is already zero and a late
+      // reply (the abort of a cancelled load) must not eat into the new requests' count.
+      this.workerLoad[wi] = Math.max(0, this.workerLoad[wi] - 1);
       this.inflight = Math.max(0, this.inflight - 1);
       this.reqs.delete(req.rid);
       if (this.reqByKey.get(key(req.card, req.level)) === req) {
