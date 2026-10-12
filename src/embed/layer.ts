@@ -55,6 +55,10 @@ export interface EmbedOptions {
   resolveTimeoutMs?: number;
   // The virtual screen a live page is laid out at (default '720p'); a card's `embed.resolution` wins.
   resolution?: EmbedResolution;
+  // Keep `allow-same-origin` in the sandbox of arbitrary (non-provider) URLs (default true). Many sites break
+  // without their own cookies and storage, but the frame then keeps its real origin across the navigations
+  // it makes. false: those frames get an opaque origin. Providers and snippets are not affected.
+  arbitrarySameOrigin?: boolean;
 }
 
 export interface EmbedEvents {
@@ -63,7 +67,7 @@ export interface EmbedEvents {
   // A card's iframe was mounted or destroyed.
   embedLive: { id: ElementId; live: boolean };
   // The card's embed was resolved. `poster` is a URL worth persisting (the host's own or a provider
-  // thumbnail), absent for a generated tile (a blob URL that dies with the page).
+  // thumbnail), absent for a generated tile or any blob URL this layer made (they die with the page).
   embedResolved: {
     id: ElementId;
     provider: EmbedProvider;
@@ -145,12 +149,14 @@ export class EmbedLayer {
   private readonly frames = new Map<ElementId, Frame>();
   private readonly done: HTMLButtonElement;
   private readonly cleanups: (() => void)[] = [];
-  private readonly timers = new Set<ReturnType<typeof setTimeout>>();
+  // Pending revokes of retired poster blobs: timer -> URL (dispose revokes the rest at once).
+  private readonly timers = new Map<ReturnType<typeof setTimeout>, string>();
   private readonly appOrigin: string | undefined;
   private opts: Required<Pick<EmbedOptions, 'maxLive' | 'maxLiveTouch' | 'resolveTimeoutMs'>> & {
     minLive: { w: number; h: number };
     resolve?: EmbedResolver;
     resolution: EmbedResolution;
+    arbitrarySameOrigin: boolean;
   };
   private selected = new Set<ElementId>();
   private touch = false;
@@ -176,6 +182,7 @@ export class EmbedLayer {
       minLive: normMinLive(options.minLivePx),
       resolve: options.resolve,
       resolution: options.resolution ?? DEFAULT_RESOLUTION,
+      arbitrarySameOrigin: options.arbitrarySameOrigin ?? true,
     };
 
     if (!this.doc.getElementById(STYLE_ID)) {
@@ -266,6 +273,16 @@ export class EmbedLayer {
       this.opts.resolution = o.resolution;
       for (const [id, f] of this.frames) this.place(id, f);
     }
+    if (o.arbitrarySameOrigin !== undefined && o.arbitrarySameOrigin !== this.opts.arbitrarySameOrigin) {
+      this.opts.arbitrarySameOrigin = o.arbitrarySameOrigin;
+      for (const [id, e] of this.entries) {
+        if (!e.ready) continue;
+        const before = e.spec?.sandbox;
+        e.spec = this.specFor(e);
+        // A live arbitrary frame is rebuilt with the new sandbox the next time it mounts.
+        if (e.spec?.sandbox !== before && this.frames.has(id)) this.destroyFrame(id);
+      }
+    }
     this.requestPlan();
   }
 
@@ -351,7 +368,10 @@ export class EmbedLayer {
       if (e.ownUrl) URL.revokeObjectURL(e.ownUrl);
       for (const u of e.stale) URL.revokeObjectURL(u);
     }
-    for (const t of this.timers) clearTimeout(t);
+    for (const [t, url] of this.timers) {
+      clearTimeout(t);
+      URL.revokeObjectURL(url);
+    }
     this.timers.clear();
     this.entries.clear();
     for (const f of this.cleanups) f();
@@ -386,6 +406,13 @@ export class EmbedLayer {
     }
     const prev = this.entries.get(el.id);
     if (prev && sameEmbed(prev.embed, embed)) {
+      // Fields `sameEmbed` ignores (the per-card `resolution`) still change what the live frame looks like.
+      if (prev.embed !== embed) {
+        prev.embed = embed;
+        const f = this.frames.get(el.id);
+        if (f) this.place(el.id, f);
+        this.requestPlan();
+      }
       // The host replaced `media` wholesale and dropped the poster this layer had written: put it back.
       if (el.media.src === undefined && prev.ownUrl) this.writePoster(el.id, prev.ownUrl);
       return;
@@ -419,15 +446,20 @@ export class EmbedLayer {
 
   private settle(entry: Entry): void {
     entry.ready = true;
-    entry.spec = canGoLive(entry.info)
+    entry.spec = this.specFor(entry);
+    if (entry.spec === null && entry.info.kind === 'url') entry.info = { ...entry.info, frameable: false };
+    this.requestPlan();
+  }
+
+  private specFor(entry: Entry): IframeSpec | null {
+    return canGoLive(entry.info)
       ? iframeSpecFor({
           source: entry.embed,
           iframeSrc: entry.info.iframeSrc ?? undefined,
           appOrigin: this.appOrigin,
+          arbitrarySameOrigin: this.opts.arbitrarySameOrigin,
         })
       : null;
-    if (entry.spec === null && entry.info.kind === 'url') entry.info = { ...entry.info, frameable: false };
-    this.requestPlan();
   }
 
   private async resolve(id: ElementId, entry: Entry): Promise<void> {
@@ -463,7 +495,7 @@ export class EmbedLayer {
       this.store.update(id, { h: Math.max(1, Math.round(el.w * a)) });
     }
     // A picture of the host's stays as it is; otherwise this layer supplies one.
-    const hostPoster = this.needsPoster(id, entry) ? undefined : this.store.get(id)?.media.src;
+    const hostPoster = this.needsPoster(id) ? undefined : this.store.get(id)?.media.src;
     const photo = hostPoster === undefined ? await this.loadPoster(id, entry, token) : null;
     if (!alive()) return;
     this.emit('embedResolved', {
@@ -478,10 +510,13 @@ export class EmbedLayer {
     });
   }
 
-  // The card has no picture of the host's: this layer supplies one.
-  private needsPoster(id: ElementId, entry: Entry): boolean {
+  // The card has no picture of the host's: this layer supplies one. Any `blob:` src counts as ours: the ones
+  // this entry made (current or stale), and those of an earlier session that a saved `board.all()` or an
+  // undo stack brought back, whose blob died with that page. (So a host's own `blob:` poster on an embed
+  // card is replaced: give it an https or data: URL.)
+  private needsPoster(id: ElementId): boolean {
     const src = this.store.get(id)?.media.src;
-    return src === undefined || src === entry.ownUrl || entry.stale.has(src);
+    return src === undefined || src.startsWith('blob:');
   }
 
   // Returns the candidate URL that became the poster, null for a generated tile.
@@ -534,7 +569,7 @@ export class EmbedLayer {
       this.timers.delete(t);
       URL.revokeObjectURL(url);
     }, REVOKE_DELAY_MS);
-    this.timers.add(t);
+    this.timers.set(t, url);
   }
 
   // ── Live iframes ───────────────────────────────────────────────────────────

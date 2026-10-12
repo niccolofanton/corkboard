@@ -2,9 +2,10 @@
 // and how interact mode behaves. Posters need canvas and network, which jsdom has not: they are not under
 // test here (the tile and provider logic is, in their own files).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+const drawTile = vi.hoisted(() => vi.fn<() => Promise<Blob | null>>(async () => null));
 vi.mock('../../src/embed/tile', async (orig) => ({
   ...(await orig<typeof import('../../src/embed/tile')>()),
-  drawTile: async () => null,
+  drawTile,
 }));
 import { EmbedLayer, type EmbedEvents } from '../../src/embed/layer';
 import { createElement } from '../../src/model';
@@ -50,7 +51,12 @@ beforeEach(() => {
   root = document.getElementById('root') as HTMLElement;
   events = [];
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+  drawTile.mockReset();
+  drawTile.mockResolvedValue(null);
+});
 
 function make(scale = 1, opts = {}) {
   const store = new Store();
@@ -307,6 +313,92 @@ describe('EmbedLayer', () => {
     layer.setOptions({ resolution: 'native' });
     expect([w.style.width, w.style.height]).toEqual(['480px', '300px']);
     expect(w.style.transform).toBe('translate(50px, 80px) scale(2)');
+  });
+
+  describe('posters made by the layer', () => {
+    let blobs = 0;
+    const revoked: string[] = [];
+    const realCreate = URL.createObjectURL;
+    const realRevoke = URL.revokeObjectURL;
+    beforeEach(() => {
+      blobs = 0;
+      revoked.length = 0;
+      URL.createObjectURL = () => `blob:made-${blobs++}`;
+      URL.revokeObjectURL = (u: string) => void revoked.push(u);
+      drawTile.mockResolvedValue(new Blob(['x']));
+    });
+    afterEach(() => {
+      URL.createObjectURL = realCreate;
+      URL.revokeObjectURL = realRevoke;
+    });
+    const resolved = () => events.filter(([t]) => t === 'embedResolved').map(([, p]) => p as EmbedEvents['embedResolved']);
+
+    it('replaces a dead blob: poster that came back with a saved board, and does not report it', async () => {
+      const { store } = make();
+      const el = embed({ media: { src: 'blob:http://localhost/dead', embed: { url: 'https://example.com/post' } } });
+      store.add([el]);
+      await vi.waitFor(() => expect(resolved()).toHaveLength(1));
+      expect(store.get(el.id)?.media.src).toBe('blob:made-0');
+      expect(resolved()[0].poster).toBeUndefined();
+    });
+
+    it('never reports its own blob as the persistable poster, but keeps and reports the host\'s https one', async () => {
+      const { store } = make();
+      const own = embed({ media: { embed: { url: 'https://example.com/a' } } });
+      const host = embed({ media: { src: 'https://cdn.example/p.jpg', embed: { url: 'https://example.com/b' } } });
+      store.add([own, host]);
+      await vi.waitFor(() => expect(resolved()).toHaveLength(2));
+      expect(resolved().find((r) => r.id === own.id)?.poster).toBeUndefined();
+      expect(resolved().find((r) => r.id === host.id)?.poster).toBe('https://cdn.example/p.jpg');
+      expect(store.get(host.id)?.media.src).toBe('https://cdn.example/p.jpg');
+      expect(store.get(own.id)?.media.src).toBe('blob:made-0');
+    });
+
+    it('dispose revokes the blobs still waiting for their delayed revoke', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const { store, layer } = make();
+      const el = embed({ media: { embed: { url: 'https://example.com/a' } } });
+      store.add([el]);
+      await vi.waitFor(() => expect(resolved()).toHaveLength(1));
+      store.remove([el.id]);
+      expect(revoked).toEqual([]);
+      layer.dispose();
+      expect(revoked).toEqual(['blob:made-0']);
+    });
+  });
+
+  it('refreshes the live frame when only the per-card resolution changes', () => {
+    const { store, frames, tick } = make();
+    const el = embed({ ...yt(), x: 0, y: 0, w: 480, h: 300 });
+    store.add([el]);
+    tick();
+    const w = frames()[0].parentElement as HTMLElement;
+    expect([w.style.width, w.style.height]).toEqual(['1152px', '720px']);
+    const media = store.get(el.id)!.media;
+    store.update(el.id, { media: { ...media, embed: { ...media.embed!, resolution: '1080p' } } });
+    expect([w.style.width, w.style.height]).toEqual(['1728px', '1080px']);
+  });
+
+  it('keeps allow-same-origin on arbitrary pages unless arbitrarySameOrigin is false', () => {
+    const page = () => embed({ media: { embed: { url: 'https://example.com/post' } } });
+    const on = make();
+    on.store.add([page()]);
+    on.tick();
+    expect(on.frames()[0].getAttribute('sandbox')).toContain('allow-same-origin');
+    on.layer.dispose();
+
+    document.body.innerHTML = '<div id="host" tabindex="0"><div id="root"></div></div>';
+    host = document.getElementById('host') as HTMLElement;
+    root = document.getElementById('root') as HTMLElement;
+    const off = make(1, { arbitrarySameOrigin: false });
+    off.store.add([page()]);
+    off.tick();
+    expect(off.frames()[0].getAttribute('sandbox')).toBe('allow-scripts allow-forms allow-popups');
+    // Switching it back at run time remounts the live frame with the new sandbox.
+    off.layer.setOptions({ arbitrarySameOrigin: true });
+    expect(off.frames()).toHaveLength(0);
+    off.tick();
+    expect(off.frames()[0].getAttribute('sandbox')).toContain('allow-same-origin');
   });
 
   it('dispose removes everything', () => {
