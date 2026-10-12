@@ -5,7 +5,7 @@ vi.hoisted(() => {
   HTMLCanvasElement.prototype.getContext = (() => null) as never;
 });
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TextureManager, type WantedItem } from '../../src/render/textures';
+import { absoluteUrl, TextureManager, type WantedItem } from '../../src/render/textures';
 import type { BoardCard } from '../../src/render/types';
 
 class FakeWorker {
@@ -98,5 +98,24 @@ describe('TextureManager worker source', () => {
       ['https://cdn.test/decode.worker.js', { type: 'module' }],
     ]);
     custom.dispose();
+  });
+});
+
+describe('absoluteUrl', () => {
+  it('resolves relative URLs against the page (the worker has a blob: base), and leaves absolute ones alone', () => {
+    const base = document.baseURI;
+    expect(absoluteUrl('/img/a.jpg')).toBe(new URL('/img/a.jpg', base).href);
+    expect(absoluteUrl('a.jpg')).toBe(new URL('a.jpg', base).href);
+    expect(absoluteUrl('https://x.test/a.jpg?q=1')).toBe('https://x.test/a.jpg?q=1');
+    expect(absoluteUrl('blob:http://x.test/uuid')).toBe('blob:http://x.test/uuid');
+    expect(absoluteUrl('data:image/png;base64,AAAA')).toBe('data:image/png;base64,AAAA');
+    expect(absoluteUrl(undefined)).toBeUndefined();
+  });
+
+  it('is what the worker is sent', () => {
+    const rel = { ...card(7), l1Url: 'img/rel.jpg' };
+    tm.setWanted([{ card: rel, level: 1, dist: 0 }]);
+    const sent = FakeWorker.all[0].sent[0] as unknown as { url: string };
+    expect(sent.url).toBe(new URL('img/rel.jpg', document.baseURI).href);
   });
 });

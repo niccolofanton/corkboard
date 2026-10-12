@@ -111,6 +111,17 @@ interface GlTextureSystemInternals {
   _setBoundTexture(location: number, source: TextureSource | null): void;
 }
 
+// The worker is started from a blob URL, where a relative URL (`/img/a.jpg`, `a.jpg`) has no base to resolve
+// against: make it absolute against the page here.
+export function absoluteUrl(url: string | undefined): string | undefined {
+  if (url === undefined) return undefined;
+  try {
+    return new URL(url, typeof document !== 'undefined' ? document.baseURI : undefined).href;
+  } catch {
+    return url;
+  }
+}
+
 const key = (card: BoardCard, level: Level): number => card.id * 4 + level;
 const isOwn = (level: Level): level is 2 | 3 => level >= 2;
 
@@ -401,7 +412,7 @@ export class TextureManager {
         rid: req.rid,
         level: req.level,
         hash: req.level === 0 ? card.thumbhash : undefined,
-        url: this.urlOf(card, req.level),
+        url: absoluteUrl(this.urlOf(card, req.level)),
         maxLong: req.maxLong,
         soft: this.opts.softCanvas,
         radiusWorld: card.radius,
