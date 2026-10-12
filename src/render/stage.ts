@@ -20,6 +20,7 @@ import { DEFAULTS, type Element, type ElementId } from '../types';
 import { CameraController } from './camera';
 import { l2Bucket, l3Bucket, MAX_L3, pickLevel, type Level } from './lod';
 import { OverlayLayer } from './overlay';
+import { parkTicker } from './parkTicker';
 import { FAR_DIST, TextureManager, type WantedItem } from './textures';
 import { DARK_THEME, cssHex, type Theme } from './theme';
 import type { BoardCard } from './types';
@@ -201,9 +202,22 @@ export class Stage {
   private nGpu = 0;
 
   static async create(host: HTMLElement, options: StageOptions = {}): Promise<Stage> {
-    // Pixi's system ticker (its GC scheduler) would keep a rAF loop alive forever: park it.
-    Ticker.system.autoStart = false;
-    Ticker.system.stop();
+    // Pixi's system ticker (its GC scheduler) would keep a rAF loop alive forever: park it, and put it back
+    // the way the host had it when the board is disposed.
+    const unpark = parkTicker(Ticker.system);
+    try {
+      return await Stage.createParked(host, options, unpark);
+    } catch (err) {
+      unpark();
+      throw err;
+    }
+  }
+
+  private static async createParked(
+    host: HTMLElement,
+    options: StageOptions,
+    unpark: () => void,
+  ): Promise<Stage> {
     if (options.cspSafe) await import('pixi.js/unsafe-eval');
     const app = new Application();
     const rect = host.getBoundingClientRect();
@@ -225,10 +239,16 @@ export class Stage {
     });
     Ticker.system.stop();
     app.ticker.stop();
-    return new Stage(app, host, options, dpr);
+    return new Stage(app, host, options, dpr, unpark);
   }
 
-  private constructor(app: Application, host: HTMLElement, options: StageOptions, dpr: number) {
+  private constructor(
+    app: Application,
+    host: HTMLElement,
+    options: StageOptions,
+    dpr: number,
+    private readonly unparkTicker: () => void,
+  ) {
     this.app = app;
     this.hostEl = host;
     this.dpr = dpr;
@@ -1477,6 +1497,7 @@ export class Stage {
     this.tm.dispose();
     this.pools.dispose();
     this.app.destroy(true, { children: true, texture: false });
+    this.unparkTicker();
   }
 
   private makeBackground(): TilingSprite {

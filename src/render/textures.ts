@@ -102,7 +102,7 @@ export interface WantedItem {
   bucket?: number;
 }
 
-// Pixi internals the partial upload leans on (all present in 8.22; pinned in package.json).
+// Pixi internals the partial upload leans on (all present in 8.22; the peer range in package.json starts there).
 interface GlTextureSystemInternals {
   getGlSource(source: TextureSource): { target: number; texture: WebGLTexture };
   initSource(source: TextureSource): void;
