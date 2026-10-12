@@ -31,7 +31,7 @@ export {
   KEEP_FACTOR,
 } from './policy';
 export type { PolicyCard, PolicyInput, PolicyPlan } from './policy';
-export { embedPlacement, MAX_LAYOUT_PX } from './geometry';
+export { DEFAULT_RESOLUTION, embedPlacement, MAX_LAYOUT_PX, resolutionShortSide } from './geometry';
 export type { EmbedPlacement } from './geometry';
 export { tileSpec, hostHue } from './tile';
 export type { TileSpec, TileGlyph } from './tile';

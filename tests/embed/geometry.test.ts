@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { corners, DEG } from '../../src/interact/geometry';
 import type { Camera } from '../../src/math';
 import { embedPlacement, MAX_LAYOUT_PX } from '../../src/embed/geometry';
+import type { EmbedResolution } from '../../src/types';
 
 const CAMERAS: Camera[] = [
   { tx: 0, ty: 0, scale: 1 },
@@ -33,10 +34,10 @@ function viaTransform(t: string, w: number, h: number): number[] {
 }
 
 describe('embedPlacement', () => {
-  for (const cam of CAMERAS) {
+  for (const res of ['720p', '1080p', 'native'] as EmbedResolution[]) for (const cam of CAMERAS) {
     for (const r of RECTS) {
-      it(`covers the card: scale ${cam.scale}, ${r.w}x${r.h}, rot ${r.rot}`, () => {
-        const p = embedPlacement(r, cam);
+      it(`covers the card: ${res}, scale ${cam.scale}, ${r.w}x${r.h}, rot ${r.rot}`, () => {
+        const p = embedPlacement(r, cam, res);
         const got = viaTransform(p.transform, p.width, p.height);
         const want = corners(r).map((v, i) => (i % 2 === 0 ? cam.tx + v * cam.scale : cam.ty + v * cam.scale));
         got.forEach((v, i) => expect(v).toBeCloseTo(want[i], 1));
@@ -44,10 +45,21 @@ describe('embedPlacement', () => {
     }
   }
 
-  it('lays out at world size up to the cap, and below it past the cap', () => {
+  it('lays out a virtual 720p / 1080p screen with the card aspect', () => {
     const cam = { tx: 0, ty: 0, scale: 1 };
-    expect(embedPlacement({ x: 0, y: 0, w: 400, h: 225 }, cam)).toMatchObject({ width: 400, height: 225 });
-    const big = embedPlacement({ x: 0, y: 0, w: 4096, h: 2048 }, cam);
+    expect(embedPlacement({ x: 0, y: 0, w: 400, h: 225 }, cam)).toMatchObject({ width: 1280, height: 720 });
+    expect(embedPlacement({ x: 0, y: 0, w: 400, h: 225 }, cam, '1080p')).toMatchObject({ width: 1920, height: 1080 });
+    expect(embedPlacement({ x: 0, y: 0, w: 300, h: 600 }, cam, '720p')).toMatchObject({ width: 720, height: 1440 });
+    expect(embedPlacement({ x: 0, y: 0, w: 400, h: 400 }, cam, 540)).toMatchObject({ width: 540, height: 540 });
+  });
+
+  it('lays out at world size for native, and below the cap past it', () => {
+    const cam = { tx: 0, ty: 0, scale: 1 };
+    expect(embedPlacement({ x: 0, y: 0, w: 400, h: 225 }, cam, 'native')).toMatchObject({ width: 400, height: 225 });
+    const tall = embedPlacement({ x: 0, y: 0, w: 100, h: 1000 }, cam, '1080p');
+    expect(tall.height).toBeLessThanOrEqual(MAX_LAYOUT_PX);
+    expect(tall.height / tall.width).toBeCloseTo(10);
+    const big = embedPlacement({ x: 0, y: 0, w: 8192, h: 4096 }, cam, 'native');
     expect(Math.max(big.width, big.height)).toBeLessThanOrEqual(MAX_LAYOUT_PX);
     expect(big.width / big.height).toBeCloseTo(2);
   });

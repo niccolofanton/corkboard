@@ -388,7 +388,8 @@ export class Corkboard {
     this.videoLayer.setPaused(paused);
   }
 
-  // Embed cards: live iframe limits (`maxLive`, `maxLiveTouch`, `minLivePx`) can change at any time.
+  // Embed cards: live iframe limits (`maxLive`, `maxLiveTouch`, `minLivePx`) and the `resolution` of the
+  // virtual screen pages are laid out at can change at any time.
   setEmbeds(o: EmbedOptions): void {
     this.embeds.setOptions(o);
   }

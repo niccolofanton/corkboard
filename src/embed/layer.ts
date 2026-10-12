@@ -16,8 +16,8 @@ import type { Stage } from '../render/stage';
 import type { Store, StoreEvent } from '../store';
 import type { Theme } from '../render/theme';
 import { elementBox } from '../interact/geometry';
-import type { Element, ElementId, EmbedSource } from '../types';
-import { embedPlacement } from './geometry';
+import type { Element, ElementId, EmbedResolution, EmbedSource } from '../types';
+import { DEFAULT_RESOLUTION, embedPlacement } from './geometry';
 import {
   MAX_LIVE_DESKTOP,
   MAX_LIVE_TOUCH,
@@ -53,6 +53,8 @@ export interface EmbedOptions {
   resolve?: EmbedResolver;
   // Give up on `resolve` after this long and use what the URL says (default 4000 ms).
   resolveTimeoutMs?: number;
+  // The virtual screen a live page is laid out at (default '720p'); a card's `embed.resolution` wins.
+  resolution?: EmbedResolution;
 }
 
 export interface EmbedEvents {
@@ -148,6 +150,7 @@ export class EmbedLayer {
   private opts: Required<Pick<EmbedOptions, 'maxLive' | 'maxLiveTouch' | 'resolveTimeoutMs'>> & {
     minLive: { w: number; h: number };
     resolve?: EmbedResolver;
+    resolution: EmbedResolution;
   };
   private selected = new Set<ElementId>();
   private touch = false;
@@ -172,6 +175,7 @@ export class EmbedLayer {
       resolveTimeoutMs: options.resolveTimeoutMs ?? 4000,
       minLive: normMinLive(options.minLivePx),
       resolve: options.resolve,
+      resolution: options.resolution ?? DEFAULT_RESOLUTION,
     };
 
     if (!this.doc.getElementById(STYLE_ID)) {
@@ -250,10 +254,18 @@ export class EmbedLayer {
     return this.entries.get(id)?.info ?? null;
   }
 
+  get resolution(): EmbedResolution {
+    return this.opts.resolution;
+  }
+
   setOptions(o: EmbedOptions): void {
     if (o.maxLive !== undefined) this.opts.maxLive = o.maxLive;
     if (o.maxLiveTouch !== undefined) this.opts.maxLiveTouch = o.maxLiveTouch;
     if (o.minLivePx !== undefined) this.opts.minLive = normMinLive(o.minLivePx);
+    if (o.resolution !== undefined) {
+      this.opts.resolution = o.resolution;
+      for (const [id, f] of this.frames) this.place(id, f);
+    }
     this.requestPlan();
   }
 
@@ -620,7 +632,8 @@ export class EmbedLayer {
     const r = this.stage.previewRectOf(id) ?? this.store.get(id);
     if (!r) return;
     const cam: Camera = this.stage.cam.cam;
-    const p = embedPlacement({ x: r.x, y: r.y, w: r.w, h: r.h, rot: r.rot }, cam);
+    const res = this.entries.get(id)?.embed.resolution ?? this.opts.resolution;
+    const p = embedPlacement({ x: r.x, y: r.y, w: r.w, h: r.h, rot: r.rot }, cam, res);
     const s = f.wrapper.style;
     if (p.width !== f.w) {
       f.w = p.width;

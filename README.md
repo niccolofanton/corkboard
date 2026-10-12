@@ -37,7 +37,7 @@ Pictures are read by a decode worker with `fetch`, so they need CORS headers. Vi
 - Selection: `selection`, `select(ids)`, `selectAll()`, `clearSelection()`.
 - `board.layout`: `tidy(ids?, opts)`, `masonry(ids?, opts)`, `align(mode, ids?)`, `distribute(axis, ids?)`, `equalWidth(ids?)`.
 - `board.camera`: `get()`, `set(cam)`, `fit(ids?)`, `zoomTo(rect)`, `zoomBy(k)`, `actual()`, `center(x, y, scale?)`, `visible()`, `screenToWorld`, `worldToScreen`.
-- Settings: `setTheme`, `setGrid`, `setSnapping({ guides, grid })`, `setVideo({ mode: 'always' | 'hover' | 'off', loop, muted })`, `setVideoPaused`, `setEmbeds({ maxLive, maxLiveTouch, minLivePx })`.
+- Settings: `setTheme`, `setGrid`, `setSnapping({ guides, grid })`, `setVideo({ mode: 'always' | 'hover' | 'off', loop, muted })`, `setVideoPaused`, `setEmbeds({ maxLive, maxLiveTouch, minLivePx, resolution })`.
 - Events (`board.on(type, fn)` returns an unsubscribe): `selection`, `hover`, `click`, `dblclick`, `transform`, `gesture`, `delete`, `change`, `camera`, `cameraSettled`, `embedInteract`, `embedLive`, `embedResolved`.
 - `stats()`, `dispose()`. The pure layout and snapping functions, `Store`, `Stage` and `Interaction` are exported too.
 
@@ -64,6 +64,10 @@ board.add({ media: { embed: { html: '<button onclick="this.textContent=1">0</but
 - Live iframe: only for a card at least 320 x 200 px on screen (`minLivePx`) or selected, zoom >= 25 %, camera still, at most
   `maxLive` at once (4, or 1 on touch). It is laid out at world size and moved with the camera as one CSS matrix; leaving the
   live state destroys it (LRU by last selection).
+- Resolution: a live page is laid out at a virtual screen with the card's aspect, then scaled onto the card, so it shows
+  its desktop layout at any card size. `embeds.resolution` is `'720p'` (default: short side 720 CSS px, a 16:9 card is a
+  1280 x 720 page), `'1080p'` (1920 x 1080), a number (the short side) or `'native'` (the card's world size: a 400 px card
+  is a 400 px wide page). `media.embed.resolution` overrides it per card; `setEmbeds({ resolution })` changes it live.
 - It does not take pointer events: pan, zoom, select and drag work over it. Double-click (or Enter on a selected card) enters
   interact mode; Done, Esc or a click outside ends it (`embedInteract`). Keys and wheel inside a cross-origin frame never reach
   the page.

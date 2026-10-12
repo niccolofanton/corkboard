@@ -8,6 +8,12 @@ export type ElementKind = 'image' | 'video' | 'embed';
 
 export type ElementId = string;
 
+// The virtual screen a live iframe is laid out at, then scaled onto the card: '720p' lays the page out with
+// its short side at 720 CSS px (a 16:9 card is a 1280 x 720 page), '1080p' at 1080 (1920 x 1080), a number
+// is that short side in CSS px, and 'native' lays it out at the card's world size (a 400 px card is a
+// 400 px wide page: mobile layouts, big text).
+export type EmbedResolution = '720p' | '1080p' | 'native' | number;
+
 // What an `embed` card shows live: a page (`url`) or a snippet of HTML (`html`), in a sandboxed iframe.
 // Exactly one of the two. The sandbox profile is derived from this and the provider at render time and is
 // never stored (src/embed/sandbox.ts).
@@ -17,6 +23,8 @@ export type EmbedSource = (
 ) & {
   // Shown on the generated tile and in the iframe's `title`.
   title?: string;
+  // Overrides the board's `embeds.resolution` for this card.
+  resolution?: EmbedResolution;
 };
 
 // Where a card's pixels come from.

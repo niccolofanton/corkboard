@@ -10,6 +10,7 @@ export type {
   ElementInit,
   ElementKind,
   ElementPatch,
+  EmbedResolution,
   EmbedSource,
   MediaSource,
 } from './types';

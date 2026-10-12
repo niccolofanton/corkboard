@@ -1,4 +1,4 @@
-import { Corkboard, type ElementInit, type EmbedInfo } from 'corkboard';
+import { Corkboard, type ElementInit, type EmbedInfo, type EmbedResolution } from 'corkboard';
 
 const COUNT = 600;
 // height / width of the pictures: a mix of portrait, square and landscape cards.
@@ -104,7 +104,7 @@ const EMBEDS: ElementInit[] = [
   // bookmark. A double-click opens the page in a new tab.
   { media: { embed: { url: 'https://github.com' }, aspect: 0.5 } },
   { media: { embed: { html: SNIPPET_GRADIENT, title: 'Animated gradient' }, aspect: 0.625 }, aspectLocked: false },
-  { media: { embed: { html: SNIPPET_COUNTER, title: 'Counter' }, aspect: 0.625 }, aspectLocked: false },
+  { media: { embed: { html: SNIPPET_COUNTER, title: 'Counter', resolution: 'native' }, aspect: 0.625 }, aspectLocked: false },
 ];
 
 // What a real host answers from a server: oEmbed titles and thumbnails, og:image, a screenshot, and
@@ -206,6 +206,8 @@ async function main(): Promise<void> {
     board.setGrid((e.target as HTMLInputElement).checked);
   $<HTMLSelectElement>('video').onchange = (e) =>
     board.setVideo({ mode: (e.target as HTMLSelectElement).value as 'always' | 'hover' | 'off' });
+  $<HTMLSelectElement>('resolution').onchange = (e) =>
+    board.setEmbeds({ resolution: (e.target as HTMLSelectElement).value as EmbedResolution });
   let dark = true;
   $('theme').onclick = () => {
     dark = !dark;

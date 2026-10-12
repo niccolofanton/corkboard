@@ -281,7 +281,7 @@ describe('EmbedLayer', () => {
     });
   });
 
-  it('places the wrapper at the card\'s world size with the camera as one transform', () => {
+  it('lays the wrapper out at a 720p screen by default, scaled onto the card by one transform', () => {
     const { store, cam, frames, tick } = make();
     cam.tx = 30;
     cam.ty = 40;
@@ -289,8 +289,23 @@ describe('EmbedLayer', () => {
     store.add([embed({ ...yt(), x: 10, y: 20, w: 480, h: 300 })]);
     tick();
     const w = frames()[0].parentElement as HTMLElement;
-    expect(w.style.width).toBe('480px');
-    expect(w.style.height).toBe('300px');
+    expect(w.style.width).toBe('1152px');
+    expect(w.style.height).toBe('720px');
+    expect(w.style.transform).toBe('translate(50px, 80px) scale(0.833333)');
+  });
+
+  it('switches resolution live: 1080p, then native (world size)', () => {
+    const { store, layer, cam, frames, tick } = make();
+    cam.tx = 30;
+    cam.ty = 40;
+    cam.scale = 2;
+    store.add([embed({ ...yt(), x: 10, y: 20, w: 480, h: 300 })]);
+    tick();
+    const w = frames()[0].parentElement as HTMLElement;
+    layer.setOptions({ resolution: '1080p' });
+    expect([w.style.width, w.style.height]).toEqual(['1728px', '1080px']);
+    layer.setOptions({ resolution: 'native' });
+    expect([w.style.width, w.style.height]).toEqual(['480px', '300px']);
     expect(w.style.transform).toBe('translate(50px, 80px) scale(2)');
   });
 
