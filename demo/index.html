@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>corkboard demo</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="board"></div>
+    <div id="bar">
+      <strong>corkboard</strong>
+      <button id="tidy" title="Reorder the selection (or everything) into a masonry grid, in reading order">Tidy grid</button>
+      <button id="masonry" title="Pack the selection (or everything) into columns, in data order">Masonry</button>
+      <button id="align" title="Align the selected cards to their left edge">Align left</button>
+      <button id="distribute" title="Equal gaps between three or more selected cards, horizontally">Distribute</button>
+      <button id="equal" title="Give the selected cards the same width">Equal width</button>
+      <button id="fit">Fit</button>
+      <span class="sep"></span>
+      <label><input type="checkbox" id="guides" checked /> Guides</label>
+      <label><input type="checkbox" id="gridsnap" /> Grid snap</label>
+      <label><input type="checkbox" id="dots" checked /> Dots</label>
+      <label>
+        Video
+        <select id="video">
+          <option value="always" selected>always</option>
+          <option value="hover">hover</option>
+          <option value="off">off</option>
+        </select>
+      </label>
+      <button id="theme">Light</button>
+      <span class="sep"></span>
+      <button id="add">+100 cards</button>
+    </div>
+    <div id="hud"></div>
+    <div id="hint">
+      Scroll to pan, pinch or ctrl+scroll to zoom, drag to pan, Shift+drag on empty canvas to select, drag a card to move it,
+      Delete to remove.
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

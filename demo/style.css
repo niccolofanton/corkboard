@@ -1,0 +1,107 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0f0f0f;
+  color: #eee;
+  font: 13px/1.3 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+#board {
+  position: fixed;
+  inset: 0;
+}
+#bar {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  width: fit-content;
+  max-width: calc(100% - 24px);
+  background: rgb(24 24 24 / 0.86);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 10px;
+  backdrop-filter: blur(10px);
+  user-select: none;
+}
+body.light #bar {
+  background: rgb(255 255 255 / 0.88);
+  border-color: rgb(0 0 0 / 0.1);
+  color: #222;
+}
+#bar strong {
+  margin-right: 4px;
+}
+#bar button,
+#bar select {
+  font: inherit;
+  color: inherit;
+  background: rgb(255 255 255 / 0.08);
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 6px;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+body.light #bar button,
+body.light #bar select {
+  background: rgb(0 0 0 / 0.05);
+  border-color: rgb(0 0 0 / 0.15);
+}
+#bar button:hover {
+  background: rgb(255 255 255 / 0.16);
+}
+body.light #bar button:hover {
+  background: rgb(0 0 0 / 0.1);
+}
+#bar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.sep {
+  width: 1px;
+  height: 18px;
+  background: currentColor;
+  opacity: 0.2;
+}
+#hud {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgb(24 24 24 / 0.86);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  pointer-events: none;
+  white-space: pre;
+}
+body.light #hud {
+  background: rgb(255 255 255 / 0.88);
+  border-color: rgb(0 0 0 / 0.1);
+  color: #222;
+}
+#hint {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  max-width: 340px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 11px;
+  background: rgb(24 24 24 / 0.86);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  pointer-events: none;
+  text-align: right;
+}
+body.light #hint {
+  background: rgb(255 255 255 / 0.88);
+  border-color: rgb(0 0 0 / 0.1);
+  color: #222;
+}
