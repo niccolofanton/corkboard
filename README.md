@@ -77,6 +77,11 @@ board.add({ media: { embed: { html: '<button onclick="this.textContent=1">0</but
 `ElementKind` (`src/types.ts`) is a union. A new kind is one view in `src/render/views/registry.ts` and, if it needs live DOM,
 one `Overlay` (`src/overlay.ts`) passed through `options.overlays`.
 
+## Docs
+
+- [docs/HANDOFF.md](docs/HANDOFF.md): how the renderer works (stage, culling, LOD textures, atlas, video, layout, snapping, perf budget, lessons learned).
+- [docs/HTML-EMBEDS.md](docs/HTML-EMBEDS.md): research on HTML / iframe cards in a WebGL canvas and the design chosen.
+
 ## Development
 
 ```sh
