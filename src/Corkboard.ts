@@ -42,6 +42,9 @@ export interface CorkboardOptions {
   textures?: Pick<StageOptions, 'budgetBytes' | 'workers' | 'workerUrl' | 'uploadBudgetMs' | 'overscan' | 'softCanvas'>;
   // Extra DOM overlays (a new element kind that needs live DOM).
   overlays?: OverlayFactory[];
+  // The zoom range of the camera (default 0.05..4). Lower the minimum for a board that is much wider than
+  // the screen and must still fit whole.
+  camera?: { minScale?: number; maxScale?: number };
   // Load Pixi's CSP-safe build (no `new Function`).
   cspSafe?: boolean;
   // Time each GPU render (EXT_disjoint_timer_query_webgl2) for `stats()`.
@@ -149,6 +152,8 @@ export class Corkboard {
       grid: options.grid,
       gpuTimer: options.gpuTimer,
       cspSafe: options.cspSafe,
+      minScale: options.camera?.minScale,
+      maxScale: options.camera?.maxScale,
     });
     return new Corkboard(host, stage, options);
   }

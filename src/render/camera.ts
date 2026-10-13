@@ -90,6 +90,15 @@ export class CameraController {
     return this.cam.scale;
   }
 
+  // The zoom range this camera clamps to.
+  get minScale(): number {
+    return this.bounds.min;
+  }
+
+  get maxScale(): number {
+    return this.bounds.max;
+  }
+
   // True while an animation owns the camera (inertia, an eased zoom, a fly-to, a live drag).
   get busy(): boolean {
     return (

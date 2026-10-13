@@ -36,6 +36,15 @@ export interface InteractionOptions {
   // Dragging and resizing write to the store on release (default true). With false the layer only emits
   // 'transform' with the proposed rects and leaves the cards where they are.
   commit?: boolean;
+  // Rubber-band selection (default true). With false a drag on the empty canvas always pans, Shift or not.
+  marquee?: boolean;
+  // A drag on the empty canvas pans without clearing the selection first; a click that does not move still
+  // clears it (default false: the selection is cleared as soon as the pointer goes down on empty canvas).
+  keepSelectionOnPan?: boolean;
+  // Draw the selection outline and the resize handles on the canvas (default true). With false the layer
+  // still selects, moves and resizes (the handles keep their hit areas) but draws no selection: the host
+  // draws its own. The hover outline is not part of it.
+  selectionOutline?: boolean;
 }
 
 export interface InteractionEvents {
@@ -63,7 +72,7 @@ const NUDGE_BIG = 10;
 const round2 = (v: number): number => Math.round(v * 100) / 100;
 
 type Gesture =
-  | { kind: 'pan'; x: number; y: number }
+  | { kind: 'pan'; x: number; y: number; clearOnClick?: boolean }
   | { kind: 'pinch'; dist: number; mx: number; my: number }
   | { kind: 'marquee'; sx: number; sy: number; base: readonly ElementId[]; additive: boolean }
   | {
@@ -97,6 +106,8 @@ export class Interaction {
   private hoverId: ElementId | null = null;
   private selDirty = true;
   private spaceDown = false;
+  // A host-driven hand tool (`setPanMode`): like holding Space.
+  private panMode = false;
   private handles: SelectionHandles | null = null;
   private lastMods: Mods = { shift: false, alt: false, ctrl: false };
   private readonly cleanups: (() => void)[] = [];
@@ -115,6 +126,9 @@ export class Interaction {
       emptyDrag: options.emptyDrag ?? 'pan',
       keyboard: options.keyboard ?? true,
       commit: options.commit ?? true,
+      marquee: options.marquee ?? true,
+      keepSelectionOnPan: options.keepSelectionOnPan ?? false,
+      selectionOutline: options.selectionOutline ?? true,
     };
     this.bind();
     this.cleanups.push(
@@ -145,13 +159,21 @@ export class Interaction {
     this.stage.requestFrame();
   }
 
+  // A hand tool the host can switch (a toolbar button, a key of its own): while on, a left-button drag
+  // pans the canvas wherever it starts, over a card included, exactly as with Space held.
+  setPanMode(on: boolean): void {
+    this.panMode = on;
+    if (on) this.setHover(null);
+  }
+
   // ── Frame ──────────────────────────────────────────────────────────────────
   private onFrame(): void {
     const g = this.gesture;
     const live = g !== null && (g.kind === 'drag' || g.kind === 'resize');
     if (!this.selDirty && !live) return;
     this.selDirty = false;
-    this.stage.overlay.setSelection(this.selectionVisual(!live));
+    const visual = this.selectionVisual(!live);
+    this.stage.overlay.setSelection(this.opts.selectionOutline ? visual : null);
     if (live) this.stage.requestFrame();
   }
 
@@ -285,7 +307,7 @@ export class Interaction {
 
     const stage = this.stage;
     const w = stage.screenToWorld(p.x, p.y);
-    if (e.button === 1 || this.spaceDown || !this.opts.select) {
+    if (e.button === 1 || this.spaceDown || this.panMode || !this.opts.select) {
       this.beginPan(p, e);
       return;
     }
@@ -319,7 +341,7 @@ export class Interaction {
       return;
     }
     // Empty canvas.
-    const marquee = (this.opts.emptyDrag === 'marquee') !== e.shiftKey;
+    const marquee = this.opts.marquee && (this.opts.emptyDrag === 'marquee') !== e.shiftKey;
     if (marquee) {
       this.startGesture({
         kind: 'marquee',
@@ -330,13 +352,14 @@ export class Interaction {
       });
       if (!e.shiftKey) this.setSelection([]);
     } else {
-      if (!e.shiftKey) this.setSelection([]);
-      this.beginPan(p, e);
+      const keep = this.opts.keepSelectionOnPan;
+      if (!e.shiftKey && !keep) this.setSelection([]);
+      this.beginPan(p, e, keep && !e.shiftKey);
     }
   }
 
-  private beginPan(p: { x: number; y: number }, e: PointerEvent): void {
-    this.startGesture({ kind: 'pan', x: p.x, y: p.y });
+  private beginPan(p: { x: number; y: number }, e: PointerEvent, clearOnClick = false): void {
+    this.startGesture({ kind: 'pan', x: p.x, y: p.y, clearOnClick });
     this.stage.cam.dragStart(p.x, p.y, e.timeStamp);
     this.host.style.cursor = 'grabbing';
   }
@@ -487,7 +510,10 @@ export class Interaction {
     switch (g.kind) {
       case 'pan':
         stage.cam.dragEnd(cancelled ? -1e9 : e.timeStamp);
-        if (!cancelled && Math.hypot(p.x - g.x, p.y - g.y) < DRAG_THRESHOLD_PX) this.emitClick(null, e, p);
+        if (!cancelled && Math.hypot(p.x - g.x, p.y - g.y) < DRAG_THRESHOLD_PX) {
+          if (g.clearOnClick) this.setSelection([]);
+          this.emitClick(null, e, p);
+        }
         break;
       case 'pinch':
         if (this.pointers.size < 2) {
@@ -593,7 +619,7 @@ export class Interaction {
 
   // ── Hover and cursor ───────────────────────────────────────────────────────
   private updateHover(p: { x: number; y: number }): void {
-    if (this.gesture || !this.opts.select) return;
+    if (this.gesture || !this.opts.select || this.panMode) return;
     const stage = this.stage;
     const w = stage.screenToWorld(p.x, p.y);
     const h = this.handles ? handleAt(this.handles, w.x, w.y, stage.cam.scale) : null;

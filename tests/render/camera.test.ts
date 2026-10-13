@@ -51,6 +51,21 @@ describe('CameraController', () => {
     expect(cam.cam.scale).toBeCloseTo(MIN_SCALE, 3);
   });
 
+  it('takes its zoom range from the bounds it is given', () => {
+    const cam = new CameraController(() => {}, { min: 0.02, max: 2 });
+    cam.setViewport(1280, 800);
+    expect(cam.minScale).toBe(0.02);
+    expect(cam.maxScale).toBe(2);
+    for (let i = 0; i < 1200; i++)
+      cam.wheel({ x: 0, y: 0, deltaX: 0, deltaY: 20, deltaMode: 0, zoom: true });
+    drain(cam);
+    expect(cam.cam.scale).toBeCloseTo(0.02, 3);
+    // A board 50 000 px wide fits whole under the lower minimum (it would not at 0.05).
+    const fit = cam.fitCamera({ x0: 0, y0: 0, x1: 50000, y1: 3000 }, 48);
+    expect(fit.scale).toBeLessThan(0.05);
+    expect(fit.scale).toBeGreaterThanOrEqual(0.02);
+  });
+
   it('glides after a flick and then parks (busy goes false)', () => {
     const { cam } = make();
     cam.dragStart(100, 100, 0);

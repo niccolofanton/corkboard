@@ -16,7 +16,7 @@ import type { Camera, Rect } from '../math';
 import { elementBox, emptyBox, worldRectOf, type WorldRect } from '../interact/geometry';
 import type { Box } from '../interact/geometry';
 import type { ChangeSet, StoreEvent } from '../store';
-import { DEFAULTS, type Element, type ElementId } from '../types';
+import { DEFAULTS, MAX_SCALE, MIN_SCALE, type Element, type ElementId } from '../types';
 import { CameraController } from './camera';
 import { l2Bucket, l3Bucket, MAX_L3, pickLevel, type Level } from './lod';
 import { OverlayLayer } from './overlay';
@@ -60,6 +60,10 @@ export interface StageOptions {
   retireDelay?: number;
   // Load Pixi's CSP-safe build (no `new Function`), for pages whose content security policy forbids eval.
   cspSafe?: boolean;
+  // The zoom range of the camera (default 0.05..4). A board of thousands of world px wide that is fitted
+  // whole needs a lower minimum.
+  minScale?: number;
+  maxScale?: number;
 }
 
 const LOD_INTERVAL_MS = 100;
@@ -86,6 +90,13 @@ function decodeBase64(s: string): Uint8Array {
   return out;
 }
 
+// The camera's zoom range from the options: the defaults for anything missing or not a usable range.
+function scaleBounds(o: Pick<StageOptions, 'minScale' | 'maxScale'>): { min: number; max: number } {
+  const min = o.minScale !== undefined && o.minScale > 0 ? o.minScale : MIN_SCALE;
+  const max = o.maxScale !== undefined && o.maxScale >= min ? o.maxScale : Math.max(MAX_SCALE, min);
+  return { min, max };
+}
+
 // A preview / committed geometry in world space, owned by the stage while a gesture runs.
 export type PreviewRect = WorldRect;
 
@@ -100,7 +111,10 @@ export class Stage {
   private readonly bg: TilingSprite;
   private readonly canvas: HTMLCanvasElement;
   private readonly opts: Required<
-    Omit<StageOptions, 'theme' | 'workers' | 'workerUrl' | 'retireDelay' | 'cspSafe' | 'grid'>
+    Omit<
+      StageOptions,
+      'theme' | 'workers' | 'workerUrl' | 'retireDelay' | 'cspSafe' | 'grid' | 'minScale' | 'maxScale'
+    >
   > & { workers: number; retireDelay?: number };
   private readonly ro: ResizeObserver;
   private readonly cleanups: (() => void)[] = [];
@@ -290,7 +304,7 @@ export class Stage {
     app.stage.eventMode = 'none';
     app.stage.addChild(this.bg, this.world, this.overlay.container);
 
-    this.cam = new CameraController(() => this.requestFrame());
+    this.cam = new CameraController(() => this.requestFrame(), scaleBounds(options));
     this.tm = new TextureManager(this.renderer, {
       budgetBytes: this.opts.budgetBytes,
       workers: this.opts.workers,
@@ -860,7 +874,7 @@ export class Stage {
     const cam = this.cam.cam;
     const cx = this.cam.width / 2;
     const cy = this.cam.height / 2;
-    const s = Math.min(4, Math.max(0.05, cam.scale * k));
+    const s = Math.min(this.cam.maxScale, Math.max(this.cam.minScale, cam.scale * k));
     const z = {
       scale: s,
       tx: cx - (cx - cam.tx) * (s / cam.scale),
