@@ -227,11 +227,22 @@ export class Interaction {
     on('pointerleave', () => this.setHover(null));
     on('dblclick', (e) => this.onDblClick(e));
     on('keydown', (e) => this.onKey(e));
-    on('keyup', (e) => {
-      if (e.code === 'Space') this.spaceDown = false;
-    });
     on('contextmenu', (e) => {
       if (this.gesture) e.preventDefault();
+    });
+    // Space is let go wherever focus is by then (a key released in another window, or after focus moved
+    // off the board, never reaches the host): listen on the window, and drop it when the window blurs.
+    const releaseSpace = (e: KeyboardEvent): void => {
+      if (e.code === 'Space') this.spaceDown = false;
+    };
+    const dropSpace = (): void => {
+      this.spaceDown = false;
+    };
+    window.addEventListener('keyup', releaseSpace);
+    window.addEventListener('blur', dropSpace);
+    this.cleanups.push(() => {
+      window.removeEventListener('keyup', releaseSpace);
+      window.removeEventListener('blur', dropSpace);
     });
   }
 

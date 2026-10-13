@@ -90,6 +90,36 @@ describe('Interaction.setPanMode', () => {
   });
 });
 
+describe('Interaction Space', () => {
+  const space = (type: 'keydown' | 'keyup', target: EventTarget = host): void => {
+    target.dispatchEvent(
+      new KeyboardEvent(type, { code: 'Space', key: ' ', bubbles: true, cancelable: true }),
+    );
+  };
+
+  it('pans from over a card while held, and lets go when the window loses focus', () => {
+    const { pointer, it_, cam } = make();
+    space('keydown');
+    pointer('pointerdown', 50, 50);
+    pointer('pointerup', 50, 50);
+    expect(it_.selection).toEqual([]);
+    expect(cam.dragStart).toHaveBeenCalledTimes(1);
+
+    // The key is released in another window: the host never hears the keyup.
+    window.dispatchEvent(new Event('blur'));
+    pointer('pointerdown', 50, 50);
+    expect(it_.selection).toEqual(['a']);
+  });
+
+  it('lets go on a keyup that lands somewhere else than the host', () => {
+    const { pointer, it_ } = make();
+    space('keydown');
+    space('keyup', document.body);
+    pointer('pointerdown', 50, 50);
+    expect(it_.selection).toEqual(['a']);
+  });
+});
+
 describe('Interaction.keepSelectionOnPan', () => {
   it('clears the selection as the pointer goes down on empty canvas by default', () => {
     const { pointer, it_ } = make();
