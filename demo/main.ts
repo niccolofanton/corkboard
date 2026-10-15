@@ -1,4 +1,10 @@
-import { Corkboard, type ElementInit, type EmbedInfo, type EmbedResolution } from 'corkboard';
+import {
+  Corkboard,
+  type ElementInit,
+  type EmbedInfo,
+  type EmbedResolution,
+  type VideoMode,
+} from 'corkboard';
 
 const COUNT = 600;
 // height / width of the pictures: a mix of portrait, square and landscape cards.
@@ -151,7 +157,137 @@ const columnsFor = (n: number): number => Math.max(2, Math.round(Math.sqrt(n * 1
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
+// Same breakpoint as the phone layout in style.css.
+const NARROW = '(max-width: 719px)';
+const STORE = 'corkboard-demo:';
+
+function load(key: string): string | null {
+  try {
+    return localStorage.getItem(STORE + key);
+  } catch {
+    return null; // storage can be blocked (private mode, sandboxed frame)
+  }
+}
+
+function save(key: string, value: string): void {
+  try {
+    localStorage.setItem(STORE + key, value);
+  } catch {
+    // A choice that is not remembered is not worth an error.
+  }
+}
+
+let toastTimer = 0;
+// One message at a time: a new one replaces the last and restarts the countdown.
+function toast(msg: string): void {
+  const el = $('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+// Add and Settings share one slot above the toolbar: opening one closes the other. Returns the closer.
+function initPopovers(): () => void {
+  const dock = $('dock');
+  const popovers = [
+    { toggle: $('add-toggle'), panel: $('add-popover') },
+    { toggle: $('settings-toggle'), panel: $('settings-popover') },
+  ];
+  const show = (panel: HTMLElement | null): void => {
+    for (const p of popovers) {
+      const open = p.panel === panel;
+      p.panel.hidden = !open;
+      p.toggle.setAttribute('aria-expanded', String(open));
+    }
+    if (panel === $('add-popover')) $('embed-url').focus();
+  };
+  for (const p of popovers) p.toggle.onclick = () => show(p.panel.hidden ? p.panel : null);
+  // Capture phase: the board and the embed field both stop their events before the document sees them.
+  document.addEventListener(
+    'pointerdown',
+    (e) => {
+      if (!dock.contains(e.target as Node)) show(null);
+    },
+    true,
+  );
+  document.addEventListener(
+    'keydown',
+    (e) => {
+      const open = popovers.find((p) => !p.panel.hidden);
+      if (e.key !== 'Escape' || !open) return;
+      e.stopPropagation(); // this Escape closes the popover and does nothing else
+      show(null);
+      open.toggle.focus();
+    },
+    true,
+  );
+  return () => show(null);
+}
+
+// A panel the user can fold away: `button` shows and hides `body`, and the choice is remembered under `key`.
+function foldable(button: HTMLElement, body: HTMLElement, key: string, openByDefault: boolean): void {
+  const show = (open: boolean): void => {
+    body.hidden = !open;
+    button.setAttribute('aria-expanded', String(open));
+  };
+  const saved = load(key);
+  show(saved ? saved === 'open' : openByDefault);
+  button.onclick = () => {
+    const open = body.hidden;
+    show(open);
+    save(key, open ? 'open' : 'closed');
+  };
+}
+
+// A segmented control is a radio group: `apply` gets the value of whichever radio was just checked.
+function onRadio<T extends string>(name: string, apply: (value: T) => void): void {
+  for (const input of document.querySelectorAll<HTMLInputElement>(`input[name="${name}"]`)) {
+    input.onchange = () => apply(input.value as T);
+  }
+}
+
+// A small stats panel: the loop parks when nothing moves (rAF/s drops to 0).
+function startStats(board: Corkboard): void {
+  const stat = (key: string, value: string): void => {
+    $(`stat-${key}`).textContent = value;
+  };
+  let lastRaf = 0;
+  let lastT = performance.now();
+  setInterval(() => {
+    const s = board.stats() as Record<string, number | number[] | Record<string, number>>;
+    const now = performance.now();
+    const raf = s.rafCalls as number;
+    const perSec = Math.round(((raf - lastRaf) / (now - lastT)) * 1000);
+    lastRaf = raf;
+    lastT = now;
+    const lv = s.levelsMounted as number[];
+    stat('cards', String(board.size));
+    stat('mounted', String(s.mounted));
+    stat('zoom', `${Math.round((s.scale as number) * 100)}%`);
+    stat('raf', String(perSec));
+    stat('tick', `${(s.tickMs as Record<string, number>).p95} ms`);
+    stat('textures', `${Math.round((s.textureBytes as number) / 1048576)} MB`);
+    stat('lod', lv.join('/'));
+    stat('playing', String(board.playing.size));
+    stat(
+      'embeds',
+      `${board.embeds.live.size}/${board.embeds.maxLive}${board.embeds.interacting ? ' · interacting' : ''}`,
+    );
+    stat('selected', String(board.selection.length));
+    const state = perSec > 0 ? 'rendering' : 'idle';
+    $('stats-state').dataset.state = state;
+    $('stats-state-label').textContent = state;
+  }, 500);
+}
+
 async function main(): Promise<void> {
+  const closePopovers = initPopovers();
+  foldable($('stats-toggle'), $('hud'), 'stats', !window.matchMedia(NARROW).matches);
+  foldable($('help-toggle'), $('help'), 'help', window.innerWidth >= 1200);
+  // The close button only shows while the card is open, so a click on the toggle is a close.
+  $('help-close').onclick = () => $('help-toggle').click();
+
   const board = await Corkboard.create($('board'), {
     theme: 'dark',
     video: { mode: 'always' },
@@ -169,7 +305,7 @@ async function main(): Promise<void> {
   const cols = (): number => columnsFor(targets()?.length ?? board.size);
   const need = (n: number): boolean => {
     if (board.selection.length >= n) return true;
-    $('hint').textContent = `Select ${n} or more cards first (Shift+click, or Shift+drag a rectangle on empty canvas).`;
+    toast(`Select ${n} or more cards first (Shift+click, or Shift+drag a rectangle on empty canvas).`);
     return false;
   };
 
@@ -187,7 +323,8 @@ async function main(): Promise<void> {
     input.value = '';
     board.select([id]);
     board.camera.fit([id], { padding: 160 });
-    $('hint').textContent = 'Embed added. Double-click it (or press Enter) to interact; Done, Esc or a click outside ends it.';
+    toast('Embed added. Double-click it (or press Enter) to interact; Done, Esc or a click outside ends it.');
+    closePopovers();
   };
   $('add-embed').onclick = addEmbed;
   $<HTMLInputElement>('embed-url').onkeydown = (e) => {
@@ -196,7 +333,8 @@ async function main(): Promise<void> {
   };
   $('add').onclick = () => {
     board.add(makeCards(100));
-    $('hint').textContent = '100 cards added next to what is on screen.';
+    toast('100 cards added next to what is on screen.');
+    closePopovers();
   };
   $<HTMLInputElement>('guides').onchange = (e) =>
     board.setSnapping({ guides: (e.target as HTMLInputElement).checked });
@@ -204,38 +342,23 @@ async function main(): Promise<void> {
     board.setSnapping({ grid: (e.target as HTMLInputElement).checked });
   $<HTMLInputElement>('dots').onchange = (e) =>
     board.setGrid((e.target as HTMLInputElement).checked);
-  $<HTMLSelectElement>('video').onchange = (e) =>
-    board.setVideo({ mode: (e.target as HTMLSelectElement).value as 'always' | 'hover' | 'off' });
-  $<HTMLSelectElement>('resolution').onchange = (e) =>
-    board.setEmbeds({ resolution: (e.target as HTMLSelectElement).value as EmbedResolution });
+  onRadio<VideoMode>('video', (mode) => board.setVideo({ mode }));
+  onRadio<Exclude<EmbedResolution, number>>('resolution', (resolution) => board.setEmbeds({ resolution }));
+  // The body background follows the `--bg` token, which is the canvas colour of each theme.
   let dark = true;
   $('theme').onclick = () => {
     dark = !dark;
     board.setTheme(dark ? 'dark' : 'light');
     document.body.classList.toggle('light', !dark);
-    document.body.style.background = dark ? '#0f0f0f' : '#f4f4f2';
-    $('theme').textContent = dark ? 'Light' : 'Dark';
+    // The icon swaps in CSS; the label and the tooltip name the action the button now does.
+    const action = dark ? 'Switch to light' : 'Switch to dark';
+    $('theme').setAttribute('aria-label', action);
+    $('theme').dataset.tip = action;
   };
 
-  // A small stats panel: the loop parks when nothing moves (rAF/s drops to 0).
-  let lastRaf = 0;
-  let lastT = performance.now();
-  setInterval(() => {
-    const s = board.stats() as Record<string, number | number[] | Record<string, number>>;
-    const now = performance.now();
-    const raf = s.rafCalls as number;
-    const perSec = Math.round(((raf - lastRaf) / (now - lastT)) * 1000);
-    lastRaf = raf;
-    lastT = now;
-    const lv = s.levelsMounted as number[];
-    $('hud').textContent =
-      `${board.size} cards · ${s.mounted} mounted · zoom ${Math.round((s.scale as number) * 100)}%\n` +
-      `rAF/s ${perSec} · tick p95 ${(s.tickMs as Record<string, number>).p95} ms\n` +
-      `textures ${Math.round((s.textureBytes as number) / 1048576)} MB · LOD L0-L3 ${lv.join('/')} · playing ${board.playing.size}\n` +
-      `embeds live ${board.embeds.live.size}/${board.embeds.maxLive}${board.embeds.interacting ? ' · interacting' : ''}`;
-  }, 500);
+  startStats(board);
   board.on('selection', ({ ids }) => {
-    if (ids.length > 0) $('hint').textContent = `${ids.length} selected`;
+    if (ids.length > 0) toast(`${ids.length} selected`);
   });
 }
 

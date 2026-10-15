@@ -2,53 +2,351 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>corkboard demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Corkboard — infinite WebGL canvas</title>
+    <meta
+      name="description"
+      content="An infinite canvas of media cards on WebGL: culling, LOD textures, video overlays, auto layout and snapping."
+    />
+    <meta name="color-scheme" content="dark light" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f0f0f'/%3E%3Cg fill='%23fafafa' transform='translate(7 7) scale(.75)'%3E%3Crect x='3' y='3' width='8' height='11' rx='2'/%3E%3Crect x='3' y='16' width='8' height='5' rx='2'/%3E%3Crect x='13' y='3' width='8' height='5' rx='2'/%3E%3Crect x='13' y='10' width='8' height='11' rx='2'/%3E%3C/g%3E%3C/svg%3E"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500&amp;display=swap"
+    />
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <div id="board"></div>
-    <div id="bar">
-      <strong>corkboard</strong>
-      <button id="tidy" title="Reorder the selection (or everything) into a masonry grid, in reading order">Tidy grid</button>
-      <button id="masonry" title="Pack the selection (or everything) into columns, in data order">Masonry</button>
-      <button id="align" title="Align the selected cards to their left edge">Align left</button>
-      <button id="distribute" title="Equal gaps between three or more selected cards, horizontally">Distribute</button>
-      <button id="equal" title="Give the selected cards the same width">Equal width</button>
-      <button id="fit">Fit</button>
-      <span class="sep"></span>
-      <label><input type="checkbox" id="guides" checked /> Guides</label>
-      <label><input type="checkbox" id="gridsnap" /> Grid snap</label>
-      <label><input type="checkbox" id="dots" checked /> Dots</label>
-      <label>
-        Video
-        <select id="video">
-          <option value="always" selected>always</option>
-          <option value="hover">hover</option>
-          <option value="off">off</option>
-        </select>
-      </label>
-      <label>
-        Embeds
-        <select id="resolution">
-          <option value="720p" selected>720p</option>
-          <option value="1080p">1080p</option>
-          <option value="native">native</option>
-        </select>
-      </label>
-      <button id="theme">Light</button>
-      <span class="sep"></span>
-      <input id="embed-url" type="url" placeholder="Paste a URL to embed" size="26" spellcheck="false" />
-      <button id="add-embed" title="Add a YouTube, Vimeo, Spotify, CodePen or Figma link, or any page">Add embed</button>
-      <span class="sep"></span>
-      <button id="add">+100 cards</button>
+
+    <!-- Top left: brand -->
+    <header id="brand" class="panel">
+      <svg class="logo" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+        <rect x="3" y="3" width="8" height="11" rx="2" />
+        <rect x="3" y="16" width="8" height="5" rx="2" />
+        <rect x="13" y="3" width="8" height="5" rx="2" />
+        <rect x="13" y="10" width="8" height="11" rx="2" />
+      </svg>
+      <span class="brand-name">corkboard</span>
+      <span class="badge">v0.1</span>
+    </header>
+
+    <!-- Top right: repo link and theme switch -->
+    <div id="top-right">
+      <a
+        id="repo"
+        class="panel panel-btn"
+        href="https://github.com/niccolofanton/corkboard"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="corkboard on GitHub"
+      >
+        <svg class="icon fill" viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"
+          />
+        </svg>
+        <span class="repo-label">GitHub</span>
+        <svg class="icon arrow" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M7 7h10v10" />
+          <path d="M7 17 17 7" />
+        </svg>
+      </a>
+      <button
+        id="theme"
+        class="panel panel-btn"
+        type="button"
+        aria-label="Switch to light"
+        data-tip="Switch to light"
+        data-tip-pos="bottom-end"
+      >
+        <svg class="icon sun" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2" />
+          <path d="M12 20v2" />
+          <path d="m4.93 4.93 1.41 1.41" />
+          <path d="m17.66 17.66 1.41 1.41" />
+          <path d="M2 12h2" />
+          <path d="M20 12h2" />
+          <path d="m6.34 17.66-1.41 1.41" />
+          <path d="m19.07 4.93-1.41 1.41" />
+        </svg>
+        <svg class="icon moon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+        </svg>
+      </button>
     </div>
-    <div id="hud"></div>
-    <div id="hint">
-      Scroll to pan, pinch or ctrl+scroll to zoom, drag to pan, Shift+drag on empty canvas to select, drag a card to move it,
-      Delete to remove.
-      Double-click an embed (or Enter) to interact with it.
+
+    <!-- Bottom centre: toolbar, with the popovers that open above it -->
+    <div id="dock">
+      <nav id="toolbar" class="panel" aria-label="Board tools">
+        <button id="tidy" class="icon-btn" type="button" aria-label="Tidy grid" data-tip="Tidy grid">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect width="7" height="7" x="3" y="3" rx="1" />
+            <rect width="7" height="7" x="14" y="3" rx="1" />
+            <rect width="7" height="7" x="14" y="14" rx="1" />
+            <rect width="7" height="7" x="3" y="14" rx="1" />
+          </svg>
+        </button>
+        <button id="masonry" class="icon-btn" type="button" aria-label="Masonry" data-tip="Masonry">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect width="18" height="18" x="3" y="3" rx="2" />
+            <path d="M9 3v18" />
+            <path d="M15 3v18" />
+          </svg>
+        </button>
+        <span class="divider" aria-hidden="true"></span>
+        <button id="align" class="icon-btn" type="button" aria-label="Align left" data-tip="Align left">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect width="9" height="6" x="6" y="14" rx="2" />
+            <rect width="16" height="6" x="6" y="4" rx="2" />
+            <path d="M2 2v20" />
+          </svg>
+        </button>
+        <button
+          id="distribute"
+          class="icon-btn"
+          type="button"
+          aria-label="Distribute horizontally"
+          data-tip="Distribute horizontally"
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect width="6" height="14" x="4" y="5" rx="2" />
+            <rect width="6" height="10" x="14" y="7" rx="2" />
+            <path d="M17 22v-5" />
+            <path d="M17 7V2" />
+            <path d="M7 22v-3" />
+            <path d="M7 5V2" />
+          </svg>
+        </button>
+        <button id="equal" class="icon-btn" type="button" aria-label="Equal width" data-tip="Equal width">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m18 8 4 4-4 4" />
+            <path d="M2 12h20" />
+            <path d="m6 8-4 4 4 4" />
+          </svg>
+        </button>
+        <span class="divider" aria-hidden="true"></span>
+        <button id="fit" class="icon-btn" type="button" aria-label="Fit to view" data-tip="Fit to view">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 7V5a2 2 0 0 1 2-2h2" />
+            <path d="M17 3h2a2 2 0 0 1 2 2v2" />
+            <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+            <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+          </svg>
+        </button>
+        <span class="divider" aria-hidden="true"></span>
+        <button
+          id="add-toggle"
+          class="icon-btn"
+          type="button"
+          aria-label="Add"
+          aria-haspopup="dialog"
+          aria-expanded="false"
+          aria-controls="add-popover"
+          data-tip="Add"
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 12h14" />
+            <path d="M12 5v14" />
+          </svg>
+        </button>
+        <button
+          id="settings-toggle"
+          class="icon-btn"
+          type="button"
+          aria-label="Settings"
+          aria-haspopup="dialog"
+          aria-expanded="false"
+          aria-controls="settings-popover"
+          data-tip="Settings"
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <line x1="21" x2="14" y1="4" y2="4" />
+            <line x1="10" x2="3" y1="4" y2="4" />
+            <line x1="21" x2="12" y1="12" y2="12" />
+            <line x1="8" x2="3" y1="12" y2="12" />
+            <line x1="21" x2="16" y1="20" y2="20" />
+            <line x1="12" x2="3" y1="20" y2="20" />
+            <line x1="14" x2="14" y1="2" y2="6" />
+            <line x1="8" x2="8" y1="10" y2="14" />
+            <line x1="16" x2="16" y1="18" y2="22" />
+          </svg>
+        </button>
+      </nav>
+
+      <div id="add-popover" class="panel popover" role="dialog" aria-label="Add" hidden>
+        <label class="label" for="embed-url">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+          </svg>
+          Embed a link
+        </label>
+        <div class="field">
+          <input
+            id="embed-url"
+            type="url"
+            inputmode="url"
+            placeholder="Paste a link…"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+          />
+          <button id="add-embed" class="btn primary" type="button">Add</button>
+        </div>
+        <p class="note">YouTube, Vimeo, Spotify, CodePen, Figma or any page.</p>
+        <hr class="rule" />
+        <button id="add" class="btn outline block" type="button">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 12h14" />
+            <path d="M12 5v14" />
+          </svg>
+          Add 100 cards
+        </button>
+      </div>
+
+      <div id="settings-popover" class="panel popover" role="dialog" aria-label="Settings" hidden>
+        <p class="label">Canvas</p>
+        <label class="row">
+          <span>Smart guides</span>
+          <input id="guides" class="switch" type="checkbox" role="switch" checked />
+        </label>
+        <label class="row">
+          <span>Snap to grid</span>
+          <input id="gridsnap" class="switch" type="checkbox" role="switch" />
+        </label>
+        <label class="row">
+          <span>Dot grid</span>
+          <input id="dots" class="switch" type="checkbox" role="switch" checked />
+        </label>
+        <p class="label">Video</p>
+        <div class="segmented" role="radiogroup" aria-label="Video playback">
+          <label><input type="radio" name="video" value="always" checked /><span>Always</span></label>
+          <label><input type="radio" name="video" value="hover" /><span>Hover</span></label>
+          <label><input type="radio" name="video" value="off" /><span>Off</span></label>
+        </div>
+        <p class="label">Embed resolution</p>
+        <div class="segmented" role="radiogroup" aria-label="Embed resolution">
+          <label><input type="radio" name="resolution" value="720p" checked /><span>720p</span></label>
+          <label><input type="radio" name="resolution" value="1080p" /><span>1080p</span></label>
+          <label><input type="radio" name="resolution" value="native" /><span>Native</span></label>
+        </div>
+      </div>
     </div>
+
+    <!-- Bottom left: stats -->
+    <aside id="stats" class="panel">
+      <button id="stats-toggle" type="button" aria-expanded="true" aria-controls="hud">
+        <span class="stats-title">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"
+            />
+          </svg>
+          Stats
+        </span>
+        <span id="stats-state" class="chip" data-state="idle"><i></i><span id="stats-state-label">idle</span></span>
+      </button>
+      <dl id="hud">
+        <dt>Cards</dt>
+        <dd id="stat-cards"></dd>
+        <dt>Mounted</dt>
+        <dd id="stat-mounted"></dd>
+        <dt>Zoom</dt>
+        <dd id="stat-zoom"></dd>
+        <dt>rAF/s</dt>
+        <dd id="stat-raf"></dd>
+        <dt>Tick p95</dt>
+        <dd id="stat-tick"></dd>
+        <dt>Textures</dt>
+        <dd id="stat-textures"></dd>
+        <dt>LOD L0–L3</dt>
+        <dd id="stat-lod"></dd>
+        <dt>Playing</dt>
+        <dd id="stat-playing"></dd>
+        <dt>Embeds live</dt>
+        <dd id="stat-embeds"></dd>
+        <dt>Selected</dt>
+        <dd id="stat-selected"></dd>
+      </dl>
+    </aside>
+
+    <!-- Bottom right: shortcuts -->
+    <div id="help" class="panel popover" role="dialog" aria-label="Shortcuts" hidden>
+      <div class="help-head">
+        <h2>Shortcuts</h2>
+        <button id="help-close" class="icon-btn sm" type="button" aria-label="Close shortcuts">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </svg>
+        </button>
+      </div>
+      <ul class="keys">
+        <li>
+          <span>Pan</span>
+          <span class="combo"><kbd>Scroll</kbd><i>/</i><kbd>Drag</kbd></span>
+        </li>
+        <li>
+          <span>Zoom</span>
+          <span class="combo"><kbd>Ctrl</kbd><i>+</i><kbd>Scroll</kbd><i>or pinch</i></span>
+        </li>
+        <li>
+          <span>Select area</span>
+          <span class="combo"><kbd>Shift</kbd><i>+</i><kbd>Drag</kbd></span>
+        </li>
+        <li>
+          <span>Move a card</span>
+          <span class="combo"><kbd>Drag</kbd></span>
+        </li>
+        <li>
+          <span>Hand tool</span>
+          <span class="combo"><kbd>Space</kbd></span>
+        </li>
+        <li>
+          <span>Delete</span>
+          <span class="combo"><kbd>Del</kbd></span>
+        </li>
+        <li>
+          <span>Use an embed</span>
+          <span class="combo"><kbd>Double-click</kbd><i>/</i><kbd>↵</kbd></span>
+        </li>
+        <li>
+          <span>Stop interacting</span>
+          <span class="combo"><kbd>Esc</kbd></span>
+        </li>
+      </ul>
+      <p class="help-foot">
+        <a href="https://github.com/niccolofanton/corkboard" target="_blank" rel="noopener noreferrer"
+          >Open source on GitHub →</a
+        >
+      </p>
+    </div>
+    <button
+      id="help-toggle"
+      class="panel panel-btn"
+      type="button"
+      aria-label="Shortcuts"
+      aria-haspopup="dialog"
+      aria-expanded="false"
+      aria-controls="help"
+      data-tip="Shortcuts"
+      data-tip-pos="top-end"
+    >
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+        <path d="M12 17h.01" />
+      </svg>
+    </button>
+
+    <div id="toast" class="panel" role="status" aria-live="polite"></div>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>
