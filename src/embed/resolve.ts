@@ -124,6 +124,6 @@ export function mergeResolved(base: ResolvedEmbed, info: EmbedInfo | null | unde
 export const canGoLive = (r: ResolvedEmbed): boolean =>
   r.frameable && (r.kind === 'html' || r.iframeSrc !== null);
 
-// Do two embeds describe the same content? (A card whose embed did not change keeps its poster.)
-export const sameEmbed = (a: EmbedSource, b: EmbedSource): boolean =>
-  a.url === b.url && a.html === b.html && a.title === b.title;
+// Do two embeds describe the same content? (A card whose embed did not change keeps its poster and its live
+// frame.) The title and the resolution are labels, not content.
+export const sameEmbed = (a: EmbedSource, b: EmbedSource): boolean => a.url === b.url && a.html === b.html;

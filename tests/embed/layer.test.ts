@@ -2,12 +2,13 @@
 // and how interact mode behaves. Posters need canvas and network, which jsdom has not: they are not under
 // test here (the tile and provider logic is, in their own files).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const drawTile = vi.hoisted(() => vi.fn<() => Promise<Blob | null>>(async () => null));
+const drawTile = vi.hoisted(() => vi.fn<(spec: { title: string }) => Promise<Blob | null>>(async () => null));
 vi.mock('../../src/embed/tile', async (orig) => ({
   ...(await orig<typeof import('../../src/embed/tile')>()),
   drawTile,
 }));
 import { EmbedLayer, type EmbedEvents } from '../../src/embed/layer';
+import { MIN_LIVE_SCALE } from '../../src/embed/policy';
 import { createElement } from '../../src/model';
 import { DARK_THEME } from '../../src/render/theme';
 import type { Stage } from '../../src/render/stage';
@@ -16,7 +17,8 @@ import type { ElementInit } from '../../src/types';
 
 const VIEW = { w: 1600, h: 1000 };
 
-function fakeStage(scale = 1) {
+// `fitRect` lands at once, the way the real camera does when its fly is over (clamped to `maxScale`).
+function fakeStage(store: Store, scale = 1, maxScale = 4) {
   const cam = { tx: 0, ty: 0, scale };
   const stage = {
     cam: {
@@ -31,8 +33,18 @@ function fakeStage(scale = 1) {
     activeTheme: DARK_THEME,
     previewRectOf: () => undefined,
     markDirty: () => {},
-    fitRect: vi.fn(),
-    contentBounds: () => ({ x0: 0, y0: 0, x1: 1, y1: 1 }),
+    fitRect: vi.fn((r: { x0: number; y0: number; x1: number; y1: number }, _animate?: boolean, pad = 48) => {
+      const w = Math.max(1, r.x1 - r.x0);
+      const h = Math.max(1, r.y1 - r.y0);
+      const k = Math.min(maxScale, Math.max(0.05, Math.min((VIEW.w - pad * 2) / w, (VIEW.h - pad * 2) / h)));
+      cam.scale = k;
+      cam.tx = (VIEW.w - w * k) / 2 - r.x0 * k;
+      cam.ty = (VIEW.h - h * k) / 2 - r.y0 * k;
+    }),
+    contentBounds: (ids: string[]) => {
+      const el = store.get(ids[0])!;
+      return { x0: el.x, y0: el.y, x1: el.x + el.w, y1: el.y + el.h };
+    },
   };
   return { stage: stage as unknown as Stage, cam };
 }
@@ -58,9 +70,9 @@ afterEach(() => {
   drawTile.mockResolvedValue(null);
 });
 
-function make(scale = 1, opts = {}) {
+function make(scale = 1, opts = {}, maxScale = 4) {
   const store = new Store();
-  const { stage, cam } = fakeStage(scale);
+  const { stage, cam } = fakeStage(store, scale, maxScale);
   const layer = new EmbedLayer(
     {
       root,
@@ -285,6 +297,66 @@ describe('EmbedLayer', () => {
       expect(layer.interacting).toBe(el.id);
       expect(frames()).toHaveLength(1);
     });
+
+    it('flies in on a card too big to fit above the minimum zoom, centred, and interacts once', () => {
+      // 600 x 4000 in a 1600 x 1000 view fits at 0.226, under the 0.25 a frame mounts at.
+      const { store, layer, stage, cam, frames } = make(0.1);
+      const el = embed({ ...yt(), x: 100, y: 200, w: 600, h: 4000 });
+      store.add([el]);
+      layer.setSelection([el.id]);
+      layer.onDblClick(el.id);
+      expect(layer.interacting).toBeNull();
+      expect(cam.scale).toBeGreaterThanOrEqual(MIN_LIVE_SCALE);
+      // The card's centre is the screen's.
+      expect(cam.tx + 400 * cam.scale).toBeCloseTo(VIEW.w / 2);
+      expect(cam.ty + 2200 * cam.scale).toBeCloseTo(VIEW.h / 2);
+      layer.onSettle();
+      expect(layer.interacting).toBe(el.id);
+      expect(frames()).toHaveLength(1);
+      expect(stage.fitRect).toHaveBeenCalledTimes(1);
+    });
+
+    it('still fits a card that fits above the minimum zoom', () => {
+      const { store, layer, stage, cam } = make(0.1);
+      const el = embed({ ...yt(), x: 0, y: 0, w: 480, h: 300 });
+      store.add([el]);
+      layer.setSelection([el.id]);
+      layer.onDblClick(el.id);
+      expect(stage.fitRect).toHaveBeenCalledWith({ x0: 0, y0: 0, x1: 480, y1: 300 }, true, 48);
+      expect(cam.scale).toBeCloseTo(Math.min(1504 / 480, 904 / 300));
+    });
+
+    it('tries once when the camera cannot get in far enough, and a later zoom does not fire it', () => {
+      const { store, layer, stage, cam } = make(0.1, {}, 0.2);
+      const el = embed(yt());
+      store.add([el]);
+      layer.setSelection([el.id]);
+      layer.onDblClick(el.id);
+      layer.onSettle();
+      expect(layer.interacting).toBeNull();
+      expect(stage.fitRect).toHaveBeenCalledTimes(1);
+      // More settles, and a zoom in later on: nothing is pending any more.
+      layer.onSettle();
+      cam.scale = 1;
+      layer.onSettle();
+      expect(layer.interacting).toBeNull();
+      expect(stage.fitRect).toHaveBeenCalledTimes(1);
+    });
+
+    it('drops a pending interact when the card is deselected', () => {
+      const { store, layer, cam } = make(0.1);
+      const el = embed(yt());
+      store.add([el]);
+      layer.setSelection([el.id]);
+      layer.onDblClick(el.id);
+      // The same card selected again keeps it ...
+      layer.setSelection([el.id]);
+      // ... but not another selection, or none.
+      layer.setSelection([]);
+      cam.scale = 1;
+      layer.onSettle();
+      expect(layer.interacting).toBeNull();
+    });
   });
 
   it('lays the wrapper out at a 720p screen by default, scaled onto the card by one transform', () => {
@@ -354,6 +426,27 @@ describe('EmbedLayer', () => {
       expect(store.get(own.id)?.media.src).toBe('blob:made-0');
     });
 
+    it('redraws its tile when only the title changes, without resolving again', async () => {
+      const resolve = vi.fn(() => ({ title: 'From resolver' }));
+      const { store } = make(1, { resolve });
+      const el = embed({ media: { embed: { url: 'https://example.com/a', title: 'Old' } } });
+      store.add([el]);
+      await vi.waitFor(() => expect(resolved()).toHaveLength(1));
+      expect(drawTile).toHaveBeenCalledTimes(1);
+      expect(drawTile.mock.calls[0][0].title).toBe('Old');
+      const media = store.get(el.id)!.media;
+      store.update(el.id, { media: { ...media, embed: { ...media.embed!, title: 'New' } } });
+      await vi.waitFor(() => expect(drawTile).toHaveBeenCalledTimes(2));
+      expect(drawTile.mock.calls[1][0].title).toBe('New');
+      await vi.waitFor(() => expect(store.get(el.id)?.media.src).toBe('blob:made-1'));
+      // Dropping the card's own title falls back to the resolver's.
+      const media2 = store.get(el.id)!.media;
+      store.update(el.id, { media: { ...media2, embed: { url: 'https://example.com/a' } } });
+      await vi.waitFor(() => expect(drawTile).toHaveBeenCalledTimes(3));
+      expect(drawTile.mock.calls[2][0].title).toBe('From resolver');
+      expect(resolve).toHaveBeenCalledTimes(1);
+    });
+
     it('dispose revokes the blobs still waiting for their delayed revoke', async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       const { store, layer } = make();
@@ -377,6 +470,76 @@ describe('EmbedLayer', () => {
     const media = store.get(el.id)!.media;
     store.update(el.id, { media: { ...media, embed: { ...media.embed!, resolution: '1080p' } } });
     expect([w.style.width, w.style.height]).toEqual(['1728px', '1080px']);
+  });
+
+  it('keeps the live frame and interact mode when only the title changes', () => {
+    const { store, layer, frames, tick } = make();
+    const el = embed({ media: { embed: { ...yt().media.embed, title: 'Old' } } });
+    store.add([el]);
+    layer.setSelection([el.id]);
+    tick();
+    layer.onDblClick(el.id);
+    const node = frames()[0];
+    expect(layer.interacting).toBe(el.id);
+    events.length = 0;
+    const media = store.get(el.id)!.media;
+    store.update(el.id, { media: { ...media, embed: { ...media.embed!, title: 'New' } } });
+    tick();
+    expect(frames()).toEqual([node]);
+    expect(node.isConnected).toBe(true);
+    expect(node.title).toBe('New');
+    expect(layer.interacting).toBe(el.id);
+    expect(layer.info(el.id)?.title).toBe('New');
+    expect(events.filter(([t]) => t === 'embedLive' || t === 'embedInteract')).toEqual([]);
+  });
+
+  describe('a store batch that removes a card', () => {
+    const settled = () => Promise.resolve().then(() => Promise.resolve()).then(() => Promise.resolve());
+
+    it('does not track a card added and removed in the same batch', async () => {
+      const resolve = vi.fn(() => null);
+      const { store, layer, frames, tick } = make(1, { resolve });
+      const el = embed({ media: { embed: { url: 'https://example.com/ghost' } } });
+      store.batch(() => {
+        store.add([el]);
+        store.remove([el.id]);
+      });
+      await settled();
+      tick();
+      expect(layer.info(el.id)).toBeNull();
+      expect(resolve).not.toHaveBeenCalled();
+      expect(frames()).toHaveLength(0);
+      expect(drawTile).not.toHaveBeenCalled();
+    });
+
+    it('does not bring back a card updated and removed in the same batch', async () => {
+      const resolve = vi.fn(() => null);
+      const { store, layer } = make(1, { resolve });
+      const el = embed({ media: { embed: { url: 'https://example.com/first' } } });
+      store.add([el]);
+      await settled();
+      resolve.mockClear();
+      store.batch(() => {
+        store.update(el.id, { media: { embed: { url: 'https://example.com/second' } } });
+        store.remove([el.id]);
+      });
+      await settled();
+      expect(layer.info(el.id)).toBeNull();
+      expect(resolve).not.toHaveBeenCalled();
+    });
+
+    it('tracks only the latest state of a card added and updated in one batch', async () => {
+      const resolve = vi.fn(() => null);
+      const { store, layer } = make(1, { resolve });
+      const el = embed({ media: { embed: { url: 'https://example.com/a' } } });
+      store.batch(() => {
+        store.add([el]);
+        store.update(el.id, { media: { embed: { url: 'https://example.com/b' } } });
+      });
+      await settled();
+      expect(layer.info(el.id)?.url).toBe('https://example.com/b');
+      expect(resolve.mock.calls).toEqual([['https://example.com/b']]);
+    });
   });
 
   it('keeps allow-same-origin on arbitrary pages unless arbitrarySameOrigin is false', () => {

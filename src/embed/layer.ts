@@ -93,6 +93,8 @@ interface Entry {
   info: ResolvedEmbed;
   // `resolve` has answered (or there is none): the card knows if it can go live.
   ready: boolean;
+  // The title the resolver gave, kept for when the card's own title goes away.
+  resolverTitle?: string;
   spec: IframeSpec | null;
   token: number;
   // The blob URL of the poster this layer made (photo or tile), written to media.src.
@@ -128,6 +130,10 @@ const CSS = `
 `;
 
 const DONE_MARGIN = 10;
+// Flying in on a card to interact with it: the screen padding around it, and a hair over the zoom a frame
+// mounts at, so the rounding of the fly cannot land under it.
+const FLY_PAD = 48;
+const FLY_IN_SCALE = MIN_LIVE_SCALE * 1.05;
 // Leave the iframe's pixels alone this long after a poster swap before revoking the old blob.
 const REVOKE_DELAY_MS = 15000;
 
@@ -322,6 +328,8 @@ export class EmbedLayer {
       if (e) e.lastUsed = ++this.clock;
     }
     if (this.interactId !== null && !this.selected.has(this.interactId)) this.exitInteract();
+    // The card was deselected while the camera flew in: that interact is stale.
+    if (this.pendingInteract !== null && !this.selected.has(this.pendingInteract)) this.pendingInteract = null;
     this.requestPlan();
   }
 
@@ -354,7 +362,8 @@ export class EmbedLayer {
     if (this.pendingInteract !== null) {
       const id = this.pendingInteract;
       this.pendingInteract = null;
-      if (this.activate(id, false)) return;
+      // One try: a camera that could not fly in far enough does not fly again.
+      if (this.activate(id, false, true)) return;
     }
     this.runPlan();
   }
@@ -382,8 +391,9 @@ export class EmbedLayer {
   private onStore(e: StoreEvent): void {
     if (e.type !== 'change' || this.disposed) return;
     for (const el of e.change.removed) this.untrack(el.id);
-    for (const el of e.change.added) this.track(el);
-    for (const u of e.change.updated) this.track(u.el);
+    // What the store holds now: a card added or updated and then removed in the same batch is gone.
+    for (const el of e.change.added) this.trackCurrent(el.id);
+    for (const u of e.change.updated) this.trackCurrent(u.el.id);
     this.planDirty = true;
   }
 
@@ -398,6 +408,11 @@ export class EmbedLayer {
     this.entries.delete(id);
   }
 
+  private trackCurrent(id: ElementId): void {
+    const el = this.store.get(id);
+    if (el) this.track(el);
+  }
+
   private track(el: Element): void {
     const embed = el.media.embed;
     if (el.kind !== 'embed' || !embed) {
@@ -406,9 +421,12 @@ export class EmbedLayer {
     }
     const prev = this.entries.get(el.id);
     if (prev && sameEmbed(prev.embed, embed)) {
-      // Fields `sameEmbed` ignores (the per-card `resolution`) still change what the live frame looks like.
+      // Fields `sameEmbed` ignores (the per-card `resolution`, the title) are not new content: the frame, its
+      // page and interact mode stay, only what shows them changes.
       if (prev.embed !== embed) {
+        const retitled = prev.embed.title !== embed.title;
         prev.embed = embed;
+        if (retitled) this.retitle(el.id, prev);
         const f = this.frames.get(el.id);
         if (f) this.place(el.id, f);
         this.requestPlan();
@@ -442,6 +460,17 @@ export class EmbedLayer {
     // No resolver: what the URL says is final, and the card can go live at once.
     if (!this.opts.resolve || info.kind === 'html' || info.url === '') this.settle(entry);
     void this.resolve(el.id, entry);
+  }
+
+  // The card's own title wins over the resolver's. Redraws a generated tile with the new one.
+  private retitle(id: ElementId, entry: Entry): void {
+    entry.info = { ...entry.info, title: entry.embed.title ?? entry.resolverTitle };
+    if (entry.ready) {
+      entry.spec = this.specFor(entry);
+      const f = this.frames.get(id);
+      if (f && entry.spec) f.iframe.title = entry.spec.title;
+    }
+    if (entry.ownKind === 'tile') void this.makeTile(id, entry, entry.token);
   }
 
   private settle(entry: Entry): void {
@@ -478,6 +507,7 @@ export class EmbedLayer {
         }
       }
       if (!alive()) return;
+      if (typeof answer?.title === 'string' && answer.title !== '') entry.resolverTitle = answer.title;
       entry.info = mergeResolved(entry.info, answer);
       this.settle(entry);
     }
@@ -697,7 +727,20 @@ export class EmbedLayer {
   }
 
   // ── Interact mode ──────────────────────────────────────────────────────────
-  private activate(id: ElementId, keyboard: boolean): boolean {
+  // Fits the card, but never below the zoom a frame mounts at: a card too big for that (a 600x4000 page on
+  // a short screen) is centred at that zoom instead.
+  private flyIn(id: ElementId): void {
+    const cam = this.stage.cam;
+    const r = this.stage.contentBounds([id]);
+    const w = Math.min(r.x1 - r.x0, Math.max(1, cam.width - FLY_PAD * 2) / FLY_IN_SCALE);
+    const h = Math.min(r.y1 - r.y0, Math.max(1, cam.height - FLY_PAD * 2) / FLY_IN_SCALE);
+    const cx = (r.x0 + r.x1) / 2;
+    const cy = (r.y0 + r.y1) / 2;
+    this.stage.fitRect({ x0: cx - w / 2, y0: cy - h / 2, x1: cx + w / 2, y1: cy + h / 2 }, true, FLY_PAD);
+  }
+
+  // `flown`: the camera has already flown in for this card, so it does not fly again.
+  private activate(id: ElementId, keyboard: boolean, flown = false): boolean {
     const entry = this.entries.get(id);
     const el = this.store.get(id);
     if (!entry || !el || !entry.ready) return false;
@@ -708,9 +751,11 @@ export class EmbedLayer {
       return true;
     }
     if (this.stage.cam.scale < MIN_LIVE_SCALE) {
-      // Too far out to mount anything: fly in, then interact once the camera settles.
+      // Too far out to mount anything: fly in, then interact once the camera settles (once: a camera that
+      // cannot get in far enough, say a low maxScale, gives up).
+      if (flown) return false;
       this.pendingInteract = id;
-      this.stage.fitRect(this.stage.contentBounds([id]), true, 48);
+      this.flyIn(id);
       return true;
     }
     if (this.interactId !== null) this.exitInteract();

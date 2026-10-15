@@ -34,8 +34,9 @@ export const PROVIDER_LABEL: Record<EmbedProvider, string> = {
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
-// Only http(s) URLs without credentials. `http:` is upgraded to `https:` except on localhost (dev).
-// `javascript:`, `data:`, `file:`, `blob:` and the rest are refused.
+// Only http(s) URLs without credentials. `http:` is upgraded to `https:` except on localhost (dev) and on
+// an explicit port (a LAN or dev server there has no TLS). `javascript:`, `data:`, `file:`, `blob:` and the
+// rest are refused.
 export function normalizeEmbedUrl(raw: string): string | null {
   let u: URL;
   try {
@@ -43,7 +44,7 @@ export function normalizeEmbedUrl(raw: string): string | null {
   } catch {
     return null;
   }
-  if (u.protocol === 'http:' && !LOCAL_HOSTS.has(u.hostname)) u.protocol = 'https:';
+  if (u.protocol === 'http:' && !LOCAL_HOSTS.has(u.hostname) && u.port === '') u.protocol = 'https:';
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
   if (u.username !== '' || u.password !== '') return null;
   return u.toString();
@@ -61,6 +62,10 @@ export function parseTimestamp(t: string | null): number | null {
 }
 
 const YT_ID = /^[\w-]{11}$/;
+// Path words that are 11 word characters long, so they look like a video id.
+const YT_PATH_WORDS = new Set(['videoseries', 'live_stream']);
+// A playlist or channel id: word characters and dashes only, so it is safe in the iframe URL.
+const YT_LIST = /^[\w-]+$/;
 const YT_HOSTS = new Set([
   'youtube.com',
   'm.youtube.com',
@@ -69,19 +74,46 @@ const YT_HOSTS = new Set([
   'youtu.be',
 ]);
 
+const ytParam = (u: URL, name: string): string | null => {
+  const v = u.searchParams.get(name);
+  return v !== null && YT_LIST.test(v) ? v : null;
+};
+
+const ytEmbed = (path: string, params: Record<string, string>): string => {
+  const q = new URLSearchParams(params).toString();
+  return `https://www.youtube-nocookie.com/embed/${path}` + (q ? `?${q}` : '');
+};
+
 function parseYouTube(u: URL, host: string): Omit<ParsedEmbed, 'url' | 'host' | 'label'> | null {
   if (!YT_HOSTS.has(host)) return null;
   const parts = u.pathname.split('/').filter(Boolean);
+  // A playlist or a live stream has no video id: `embed/videoseries?list=` and `embed/live_stream?channel=`.
+  // No ytimg poster either (there is no id to ask for): the card gets the generated tile.
+  if (host !== 'youtu.be' && parts[0] === 'embed' && YT_PATH_WORDS.has(parts[1] ?? '')) {
+    const series = parts[1] === 'videoseries';
+    const value = ytParam(u, series ? 'list' : 'channel');
+    if (value === null) return null;
+    return {
+      provider: 'youtube',
+      iframeSrc: ytEmbed(parts[1], series ? { list: value } : { channel: value }),
+      aspect: 9 / 16,
+      posters: [],
+    };
+  }
   let id: string | null = null;
   if (host === 'youtu.be') id = parts[0] ?? null;
   else if (parts[0] === 'watch') id = u.searchParams.get('v');
   else if (['embed', 'shorts', 'live', 'v'].includes(parts[0] ?? '')) id = parts[1] ?? null;
-  if (id === null || !YT_ID.test(id)) return null;
+  if (id === null || !YT_ID.test(id) || YT_PATH_WORDS.has(id)) return null;
   const start = parseTimestamp(u.searchParams.get('t') ?? u.searchParams.get('start'));
+  // A video watched inside a playlist keeps the playlist.
+  const list = ytParam(u, 'list');
+  const params: Record<string, string> = {};
+  if (list !== null) params.list = list;
+  if (start) params.start = String(start);
   return {
     provider: 'youtube',
-    iframeSrc:
-      `https://www.youtube-nocookie.com/embed/${id}` + (start ? `?start=${start}` : ''),
+    iframeSrc: ytEmbed(id, params),
     aspect: 9 / 16,
     // maxresdefault (1280x720) is missing on some videos; mqdefault (320x180) is always there and, unlike
     // hqdefault, has no letterbox bars.
@@ -92,10 +124,19 @@ function parseYouTube(u: URL, host: string): Omit<ParsedEmbed, 'url' | 'host' | 
   };
 }
 
+// Pages that list videos: a bare one (no `video` segment) is not a video.
+const VIMEO_LISTS = new Set(['showcase', 'album', 'event']);
+
 function parseVimeo(u: URL, host: string): Omit<ParsedEmbed, 'url' | 'host' | 'label'> | null {
   if (host !== 'vimeo.com' && host !== 'player.vimeo.com') return null;
   const parts = u.pathname.split('/').filter(Boolean);
-  const i = parts.findIndex((p) => /^\d+$/.test(p));
+  const isId = (p: string | undefined): boolean => p !== undefined && /^\d+$/.test(p);
+  // The digits after `video` / `videos` (`showcase/987/video/123`, `player.vimeo.com/video/123`), else the
+  // first number (`123`, `channels/staffpicks/123`) unless the page is a showcase, album or event.
+  const v = parts.findIndex((p) => p === 'video' || p === 'videos');
+  let i = -1;
+  if (v >= 0) i = isId(parts[v + 1]) ? v + 1 : -1;
+  else if (!VIMEO_LISTS.has(parts[0] ?? '')) i = parts.findIndex(isId);
   if (i < 0) return null;
   const id = parts[i];
   // An unlisted video carries a hash: `vimeo.com/ID/HASH` or `?h=HASH`.

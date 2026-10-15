@@ -51,12 +51,21 @@ export class VideoLayer {
   private mode: VideoMode = 'always';
   private loop = true;
   private muted = true;
+  private paused = false;
+  // The tab is in the background: the overlay stays paused (sound included) until it is back.
+  private hidden: boolean;
+  private readonly cleanups: (() => void)[] = [];
 
   constructor(deps: VideoLayerDeps, options: VideoOptions = {}) {
     const { root, store, stage } = deps;
     this.store = store;
     this.stage = stage;
     this.overlay = new VideoOverlay(root);
+    const doc = root.ownerDocument;
+    this.hidden = doc.visibilityState === 'hidden';
+    const onVisibility = (): void => this.setHidden(doc.visibilityState === 'hidden');
+    doc.addEventListener('visibilitychange', onVisibility);
+    this.cleanups.push(() => doc.removeEventListener('visibilitychange', onVisibility));
     this.ambient = new AmbientVideos({
       root,
       camera: () => stage.cam.cam,
@@ -102,7 +111,7 @@ export class VideoLayer {
     this.loop = o.loop ?? this.loop;
     this.muted = o.muted ?? this.muted;
     this.overlay.setPlayback({ loop: this.loop, muted: this.muted });
-    this.controller.setEnabled(mode !== 'off');
+    this.controller.setEnabled(!this.paused && mode !== 'off');
     this.ambient.setOptions({
       always: mode === 'always',
       loop: this.loop,
@@ -111,6 +120,8 @@ export class VideoLayer {
       maxPlaying: o.maxPlaying,
       maxPlayingTouch: o.maxPlayingTouch,
     });
+    // Whether the pool covers a card (it does not once the sound is on) decides the overlay too.
+    this.controller.recheck();
   }
 
   get playing(): ReadonlySet<ElementId> {
@@ -137,6 +148,7 @@ export class VideoLayer {
 
   // Pauses every stream (a lightbox over the canvas, say).
   setPaused(paused: boolean): void {
+    this.paused = paused;
     this.controller.setEnabled(!paused && this.mode !== 'off');
     this.ambient.setPaused(paused);
   }
@@ -161,6 +173,7 @@ export class VideoLayer {
   }
 
   dispose(): void {
+    for (const f of this.cleanups) f();
     this.controller.dispose();
     this.ambient.dispose();
     this.overlay.dispose();
@@ -178,9 +191,19 @@ export class VideoLayer {
     }
   }
 
+  private setHidden(hidden: boolean): void {
+    if (hidden === this.hidden) return;
+    this.hidden = hidden;
+    if (hidden) this.overlay.suspend();
+    else this.overlay.resume();
+  }
+
   private showOverlay(id: ElementId, load = true): void {
     const t = this.targetOf(id);
-    if (t) this.overlay.show(t, this.stage.cam.cam, load);
+    if (!t) return;
+    this.overlay.show(t, this.stage.cam.cam, load);
+    // A card that starts while the tab is in the background stays paused.
+    if (this.hidden) this.overlay.suspend();
   }
 
   private targetOf(id: ElementId): VideoTarget | null {

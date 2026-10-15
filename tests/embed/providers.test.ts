@@ -16,6 +16,12 @@ describe('normalizeEmbedUrl', () => {
     expect(normalizeEmbedUrl('http://localhost:5173/x')).toBe('http://localhost:5173/x');
     expect(normalizeEmbedUrl('http://127.0.0.1:8080/')).toBe('http://127.0.0.1:8080/');
   });
+  it('does not upgrade http on an explicit port: a LAN or dev server has no TLS there', () => {
+    expect(normalizeEmbedUrl('http://192.168.1.20:3000/app')).toBe('http://192.168.1.20:3000/app');
+    expect(normalizeEmbedUrl('http://dev.example.com:8080/')).toBe('http://dev.example.com:8080/');
+    // The default port is no port at all.
+    expect(normalizeEmbedUrl('http://example.com:80/a')).toBe('https://example.com/a');
+  });
   it.each([
     'javascript:alert(1)',
     'data:text/html,<script>1</script>',
@@ -74,6 +80,34 @@ describe('YouTube', () => {
     expect(parseEmbedUrl('https://www.youtube.com/watch?v=short')?.provider).toBe('generic');
     expect(parseEmbedUrl('https://www.youtube.com/')?.provider).toBe('generic');
   });
+  it('embeds a playlist: videoseries is a path word, not a video id', () => {
+    const p = parseEmbedUrl('https://www.youtube.com/embed/videoseries?list=PLx0sYbCqOb8TBPRdmBHs5Iftvv9TPboYG');
+    expect(p?.provider).toBe('youtube');
+    expect(p?.iframeSrc).toBe(
+      'https://www.youtube-nocookie.com/embed/videoseries?list=PLx0sYbCqOb8TBPRdmBHs5Iftvv9TPboYG',
+    );
+    // No video id, so no ytimg poster to ask for.
+    expect(p?.posters).toEqual([]);
+    expect(providerOfIframeSrc(p?.iframeSrc ?? '')).toBe('youtube');
+  });
+  it('embeds a live stream by channel', () => {
+    const p = parseEmbedUrl('https://www.youtube.com/embed/live_stream?channel=UCSJ4gkVC6NrvII8umztf0Ow');
+    expect(p?.provider).toBe('youtube');
+    expect(p?.iframeSrc).toBe(
+      'https://www.youtube-nocookie.com/embed/live_stream?channel=UCSJ4gkVC6NrvII8umztf0Ow',
+    );
+    expect(p?.posters).toEqual([]);
+  });
+  it('falls back to a generic page for a playlist or live embed without its id', () => {
+    expect(parseEmbedUrl('https://www.youtube.com/embed/videoseries')?.provider).toBe('generic');
+    expect(parseEmbedUrl('https://www.youtube.com/embed/videoseries?list=a%26b')?.provider).toBe('generic');
+    expect(parseEmbedUrl('https://www.youtube.com/embed/live_stream')?.provider).toBe('generic');
+  });
+  it('keeps the playlist of a video watched inside one', () => {
+    const p = parseEmbedUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLabc_123-x&t=42');
+    expect(p?.iframeSrc).toBe(`${embed}?list=PLabc_123-x&start=42`);
+    expect(p?.posters[0]).toBe('https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg');
+  });
 });
 
 describe('Vimeo', () => {
@@ -96,6 +130,27 @@ describe('Vimeo', () => {
   });
   it('needs a numeric id', () => {
     expect(parseEmbedUrl('https://vimeo.com/about')?.provider).toBe('generic');
+  });
+  it('embeds the video of a showcase, album or group URL, not the collection', () => {
+    expect(parseEmbedUrl('https://vimeo.com/showcase/987/video/123')?.iframeSrc).toBe(
+      'https://player.vimeo.com/video/123',
+    );
+    expect(parseEmbedUrl('https://vimeo.com/album/987/video/123/abcdef1234')?.iframeSrc).toBe(
+      'https://player.vimeo.com/video/123?h=abcdef1234',
+    );
+    expect(parseEmbedUrl('https://vimeo.com/groups/name/videos/123')?.iframeSrc).toBe(
+      'https://player.vimeo.com/video/123',
+    );
+  });
+  it('is a generic page for a showcase, album or event without a video', () => {
+    for (const u of [
+      'https://vimeo.com/showcase/987',
+      'https://vimeo.com/album/987',
+      'https://vimeo.com/event/987',
+      'https://vimeo.com/showcase/987/video',
+    ]) {
+      expect(parseEmbedUrl(u)?.provider, u).toBe('generic');
+    }
   });
 });
 

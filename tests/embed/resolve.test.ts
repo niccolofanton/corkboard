@@ -71,12 +71,13 @@ describe('mergeResolved', () => {
 });
 
 describe('sameEmbed', () => {
-  it('compares url, html and title', () => {
+  it('compares url and html, not the title or the resolution', () => {
     expect(sameEmbed({ url: 'a' }, { url: 'a' })).toBe(true);
     expect(sameEmbed({ url: 'a' }, { url: 'b' })).toBe(false);
     expect(sameEmbed({ html: 'a' }, { html: 'a' })).toBe(true);
     expect(sameEmbed({ url: 'a' }, { html: 'a' })).toBe(false);
-    expect(sameEmbed({ url: 'a', title: 'x' }, { url: 'a' })).toBe(false);
+    expect(sameEmbed({ url: 'a', title: 'x' }, { url: 'a' })).toBe(true);
+    expect(sameEmbed({ html: 'a', title: 'x' }, { html: 'a', title: 'y', resolution: '1080p' })).toBe(true);
   });
 });
 
