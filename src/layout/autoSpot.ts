@@ -13,17 +13,13 @@ const MAX_RINGS = 160;
 // Tolerance in lattice units so boxes that exactly touch (floating point noise included) stay free.
 const EPS = 1e-9;
 
-// How the search works: the block's top-left at lattice point p overlaps the box B exactly when
-// p lies strictly inside B grown by the block's size on its min sides, i.e. in the open range
-// (B.min - blockSize, B.max). So instead of testing every candidate against every box, each
-// box paints a rectangle of lattice cells into a 2D difference array; one prefix-sum pass then
-// tells whether any candidate is blocked. Cost: O(boxes + cells), independent of block size.
-export function autoSpot(
+// The lattice the search runs on: the block centred on the viewport (ox, oy is its top-left), the step,
+// and how many rings out the search goes. NaN or infinite inputs give a non-finite `maxRadius`.
+function searchPlan(
   block: { w: number; h: number },
   viewport: Box,
-  occupied: readonly Box[],
-  opts: { step?: number; maxRadiusFactor?: number } = {},
-): { x: number; y: number } {
+  opts: { step?: number; maxRadiusFactor?: number },
+): { ox: number; oy: number; step: number; maxRings: number; maxRadius: number } {
   const step0 = opts.step !== undefined && opts.step > 0 ? opts.step : DEFAULT_STEP;
   const factor = opts.maxRadiusFactor ?? DEFAULT_MAX_RADIUS_FACTOR;
   // Top-left of the block when centred on the viewport.
@@ -36,6 +32,39 @@ export function autoSpot(
   if (maxRings > MAX_RINGS) {
     maxRings = MAX_RINGS;
     step = maxRadius / MAX_RINGS;
+  }
+  return { ox, oy, step, maxRings, maxRadius };
+}
+
+// The world area `autoSpot` can put the block in: only boxes meeting it can block a candidate. Query the
+// store for this, not for the viewport: the search reaches 2 viewport diagonals out, and the block's own
+// size past that.
+export function autoSpotArea(
+  block: { w: number; h: number },
+  viewport: Box,
+  opts: { step?: number; maxRadiusFactor?: number } = {},
+): Box {
+  const { ox, oy, step, maxRings } = searchPlan(block, viewport, opts);
+  const reach = step * maxRings;
+  return { minX: ox - reach, minY: oy - reach, maxX: ox + block.w + reach, maxY: oy + block.h + reach };
+}
+
+// How the search works: the block's top-left at lattice point p overlaps the box B exactly when
+// p lies strictly inside B grown by the block's size on its min sides, i.e. in the open range
+// (B.min - blockSize, B.max). So instead of testing every candidate against every box, each
+// box paints a rectangle of lattice cells into a 2D difference array; one prefix-sum pass then
+// tells whether any candidate is blocked. Cost: O(boxes + cells), independent of block size.
+export function autoSpot(
+  block: { w: number; h: number },
+  viewport: Box,
+  occupied: readonly Box[],
+  opts: { step?: number; maxRadiusFactor?: number } = {},
+): { x: number; y: number } {
+  const { ox, oy, step, maxRings, maxRadius } = searchPlan(block, viewport, opts);
+  // A non-finite viewport or block has no lattice (the ring loop would never end): the centre, or the
+  // origin when even that is not a number.
+  if (!Number.isFinite(maxRadius) || !Number.isFinite(ox) || !Number.isFinite(oy)) {
+    return { x: Number.isFinite(ox) ? ox : 0, y: Number.isFinite(oy) ? oy : 0 };
   }
 
   let rings = Math.min(maxRings, INITIAL_RINGS);

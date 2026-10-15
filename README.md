@@ -67,7 +67,8 @@ await Corkboard.create(el, { textures: { workerUrl } });
 - Keyboard shortcuts act only while the board itself has focus, never for keys typed in an `<input>` inside the host.
 
 A card is `{ media: { src, video?, sizes?, aspect?, thumbhash?, color? }, x?, y?, w?, h?, rot?, radius?, locked?, aspectLocked?, data? }`.
-Cards with no `x` / `y` are placed on a free spot near what is on screen.
+Cards with no `x` / `y` are placed on a free spot near what is on screen (a given `x` or `y` alone is kept, and an embed
+without `w` is 400 wide).
 
 ## Embeds
 

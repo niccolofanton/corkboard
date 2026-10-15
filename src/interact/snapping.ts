@@ -81,6 +81,10 @@ export interface SnapResult {
   dx: number;
   dy: number;
   guides: Guide[];
+  // A resize that flags both opposite edges of an axis (a symmetric resize): the edge `dx` / `dy` applies to.
+  // Absent when that axis did not snap, or for a move.
+  edgeX?: 'min' | 'max';
+  edgeY?: 'min' | 'max';
 }
 
 export interface ResizeEdges {
@@ -1104,6 +1108,8 @@ function snap(
 ): SnapResult {
   out.dx = 0;
   out.dy = 0;
+  out.edgeX = undefined;
+  out.edgeY = undefined;
   out.guides.length = 0;
   if (!(threshold > 0) || index.count === 0 || (maskX === 0 && maskY === 0)) return out;
 
@@ -1129,6 +1135,10 @@ function snap(
   const dy = winY !== WIN_NONE ? axDelta[1] : 0;
   out.dx = dx;
   out.dy = dy;
+  if (!wholeBox) {
+    if (lineX >= 0) out.edgeX = lineX === 0 ? 'min' : 'max';
+    if (lineY >= 0) out.edgeY = lineY === 0 ? 'min' : 'max';
+  }
   const shiftMinX = lineX >= 0 && (wholeBox || lineX === 0);
   const shiftMaxX = lineX >= 0 && (wholeBox || lineX === 2);
   const shiftMinY = lineY >= 0 && (wholeBox || lineY === 0);
@@ -1194,7 +1204,8 @@ export function snapMove(
 // the box's width / height matching a nearby box's, and to equal gaps next to the dragged edge. The
 // correction applies to the dragged edge's coordinate: `dx` to the left or right edge, `dy` to the
 // top or bottom one. If both opposite edges of an axis are flagged (a symmetric resize), only the
-// nearer one snaps to a line and sizes and gaps are skipped; callers flag one edge per axis.
+// nearer one snaps to a line and sizes and gaps are skipped; `edgeX` / `edgeY` then say which edge the
+// correction belongs to.
 export function snapResize(
   index: SnapIndex,
   moving: Box,

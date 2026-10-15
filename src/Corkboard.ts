@@ -68,7 +68,10 @@ export interface CameraOptions {
 }
 
 export class CameraApi {
-  constructor(private readonly stage: Stage) {}
+  constructor(
+    private readonly stage: Stage,
+    private readonly store: Store,
+  ) {}
 
   get(): Camera {
     return { ...this.stage.cam.cam };
@@ -78,8 +81,10 @@ export class CameraApi {
     this.stage.setCamera(c);
   }
 
-  // Fits the given cards (default: all) in the view.
+  // Fits the given cards (default: all) in the view. With nothing to fit (an empty board, or none of the
+  // ids is a card) the camera stays where it is.
   fit(ids?: readonly ElementId[], o: CameraOptions = {}): void {
+    if (ids ? !ids.some((id) => this.store.has(id)) : this.store.size === 0) return;
     this.stage.fitRect(() => this.stage.contentBounds(ids), o.animate ?? true, o.padding ?? 48);
   }
 
@@ -165,7 +170,7 @@ export class Corkboard {
   ) {
     this.stage = stage;
     stage.attach(this.store);
-    this.camera = new CameraApi(stage);
+    this.camera = new CameraApi(stage, this.store);
     this.layout = new LayoutApi(this.store, stage);
 
     const sn = options.snapping;
@@ -265,22 +270,26 @@ export class Corkboard {
 
   // ── Elements ───────────────────────────────────────────────────────────────
   // Adds cards and returns their ids. A card with no `x` / `y` is placed on a free spot near the middle
-  // of what is on screen, together with the others that have none, as one masonry block.
+  // of what is on screen, together with the others that have none, as one masonry block. Its size is the
+  // one it was given, or its kind's default if that has a width of its own (embeds); an `x` or `y` it
+  // came with is kept, the other coordinate is placed.
   add(input: ElementInit | readonly ElementInit[]): ElementId[] {
     const inits: readonly ElementInit[] = Array.isArray(input) ? input : [input as ElementInit];
     const els: Element[] = [];
     const unplaced: Element[] = [];
     const fixedSize = new Set<ElementId>();
+    const given = new Map<ElementId, { x?: number; y?: number }>();
     for (const init of inits) {
       const id = init.id ?? newId();
       const el = createElement(init, id);
       els.push(el);
       if (init.x === undefined || init.y === undefined) {
         unplaced.push(el);
-        if (init.w !== undefined || init.h !== undefined) fixedSize.add(id);
+        if (init.w !== undefined || init.h !== undefined || el.kind === 'embed') fixedSize.add(id);
+        if (init.x !== undefined || init.y !== undefined) given.set(id, { x: init.x, y: init.y });
       }
     }
-    this.layout.placeNew(unplaced, fixedSize);
+    this.layout.placeNew(unplaced, fixedSize, given);
     this.store.add(els);
     return els.map((e) => e.id);
   }

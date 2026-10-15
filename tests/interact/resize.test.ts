@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { fromRectLocal } from '../../src/interact/geometry';
 import { MAX_SIZE, MIN_SIZE, ResizeSession, type GeometryPatch, type Mods } from '../../src/interact/resize';
 import type { HandleId } from '../../src/interact/handles';
+import { SnapSession } from '../../src/interact/snap';
+import { Store } from '../../src/store';
 import { el, readerOf } from './fixtures';
 
 const NONE: Mods = { shift: false, alt: false, ctrl: false };
@@ -290,5 +292,93 @@ describe('ResizeSession: snapping', () => {
     expect(box).toEqual({ minX: 0, minY: 0, maxX: 600, maxY: 200 });
     // Corrected pointer x = 570 -> scale 1.9.
     expect(patchOf(p, 'a').w).toBeCloseTo(190);
+  });
+});
+
+describe('ResizeSession: snapping a resize about the centre', () => {
+  const alt = { ...NONE, alt: true };
+  // Snaps against the cards of a real store, wired the way the controller does.
+  const snapper = (cards: ReturnType<typeof el>[], moved: string[]) => {
+    const store = new Store();
+    store.add(cards);
+    const snap = new SnapSession({ guides: true, grid: false }, 24);
+    snap.begin(store, { x0: -1000, y0: -1000, x1: 1000, y1: 1000 }, 1, new Set(moved));
+    return (box: Parameters<SnapSession['resize']>[0], edges: Parameters<SnapSession['resize']>[1]) =>
+      snap.resize(box, edges);
+  };
+  // A card whose right edge is the line x = -3, and one whose left edge is x = 103.
+  const west = () => el('w', { x: -103, y: 500, w: 100, h: 100 });
+  const east = () => el('e', { x: 103, y: 500, w: 100, h: 100 });
+
+  it('lands the opposite edge on its guide: the east handle with Alt snaps the west edge', () => {
+    const a = free('a', { x: 0, y: 0, w: 100, h: 100 });
+    const s = new ResizeSession(readerOf([a]), ['a'], 'e', { x: 100, y: 50 });
+    const p = s.update({ x: 100, y: 50 }, alt, snapper([a, west()], ['a'])).get('a') as GeometryPatch;
+    expect(p.x).toBeCloseTo(-3);
+    expect(p.w).toBeCloseTo(106);
+    expect(p.h).toBe(100);
+  });
+
+  it('still lands the dragged edge on its guide', () => {
+    const a = free('a', { x: 0, y: 0, w: 100, h: 100 });
+    const s = new ResizeSession(readerOf([a]), ['a'], 'e', { x: 100, y: 50 });
+    const p = s.update({ x: 100, y: 50 }, alt, snapper([a, east()], ['a'])).get('a') as GeometryPatch;
+    expect(p.x + p.w).toBeCloseTo(103);
+    expect(p.w).toBeCloseTo(106);
+  });
+
+  it('the west handle with Alt snaps the east edge', () => {
+    const a = free('a', { x: 0, y: 0, w: 100, h: 100 });
+    const s = new ResizeSession(readerOf([a]), ['a'], 'w', { x: 0, y: 50 });
+    const p = s.update({ x: 0, y: 50 }, alt, snapper([a, east()], ['a'])).get('a') as GeometryPatch;
+    expect(p.x + p.w).toBeCloseTo(103);
+    expect(p.x).toBeCloseTo(-3);
+  });
+
+  it('an aspect-locked card does the same', () => {
+    const a = el('a', { x: 0, y: 0, w: 100, h: 100 });
+    const s = new ResizeSession(readerOf([a]), ['a'], 'e', { x: 100, y: 50 });
+    const p = s.update({ x: 100, y: 50 }, alt, snapper([a, west()], ['a'])).get('a') as GeometryPatch;
+    expect(p.x).toBeCloseTo(-3);
+    expect(p.w).toBeCloseTo(106);
+    expect(p.h).toBeCloseTo(106);
+  });
+
+  it('turned by a quarter, the world edge that snaps is the one that moves', () => {
+    // At 90 degrees the element's east side faces world south: a guide at y = 103 is the south edge, and
+    // the north edge mirrors it.
+    const a = free('a', { x: 0, y: 0, w: 100, h: 100, rot: 90 });
+    const south = el('s', { x: 500, y: -103, w: 100, h: 100 });
+    const s = new ResizeSession(readerOf([a]), ['a'], 'e', { x: 50, y: 100 });
+    const p = s.update({ x: 50, y: 100 }, alt, snapper([a, south], ['a'])).get('a') as GeometryPatch;
+    // The element's width runs along world y: its north edge sits on y = -3.
+    expect(p.w).toBeCloseTo(106);
+    expect(p.y + p.h / 2 - p.w / 2).toBeCloseTo(-3);
+  });
+
+  it('a multi-selection scales about its centre onto the guide of the opposite edge', () => {
+    const list = [el('a', { x: 0, y: 0 }), el('b', { x: 200, y: 0 })];
+    const s = new ResizeSession(readerOf(list), ['a', 'b'], 'se', { x: 300, y: 100 });
+    const m = s.update({ x: 300, y: 100 }, alt, snapper([...list, west()], ['a', 'b']));
+    // The shared box was 0..300: its west edge is on x = -3 now, so it scaled by 306 / 300.
+    expect(patchOf(m, 'a').x).toBeCloseTo(-3);
+    expect(patchOf(m, 'a').w).toBeCloseTo(102);
+    expect(patchOf(m, 'b').x + patchOf(m, 'b').w).toBeCloseTo(303);
+  });
+
+  it('applies the correction as given when the snapper does not name an edge', () => {
+    const a = free('a', { x: 100, y: 100, w: 200, h: 100 });
+    const s = new ResizeSession(readerOf([a]), ['a'], 'e', { x: 300, y: 150 });
+    const p = s.update({ x: 350, y: 150 }, alt, () => ({ dx: -10, dy: 0 })).get('a') as GeometryPatch;
+    expect(p.w).toBe(280);
+  });
+
+  it('flips the correction of an opposite edge', () => {
+    const a = free('a', { x: 100, y: 100, w: 200, h: 100 });
+    const s = new ResizeSession(readerOf([a]), ['a'], 'e', { x: 300, y: 150 });
+    // The west edge (100 - 50 = 50) wants to move 10 east: the pointer, which pulls it west, moves 10 back.
+    const p = s.update({ x: 350, y: 150 }, alt, () => ({ dx: 10, dy: 0, edgeX: 'min' })).get('a') as GeometryPatch;
+    expect(p.x).toBeCloseTo(60);
+    expect(p.w).toBeCloseTo(280);
   });
 });

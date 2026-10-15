@@ -73,7 +73,8 @@ export interface Element {
 }
 
 // What `add` takes. Everything but `media` is optional: a card with no position is placed by
-// `autoSpot` next to what is on screen; a missing size is derived from `w` and the media's aspect.
+// `autoSpot` next to what is on screen (an `x` or `y` it has is kept); a missing size is derived from `w`
+// and the media's aspect (an embed's default width is DEFAULTS.embedWidth).
 export interface ElementInit {
   id?: ElementId;
   kind?: ElementKind;

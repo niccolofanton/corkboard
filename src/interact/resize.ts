@@ -21,11 +21,12 @@ export interface Mods {
 
 // Wired by the controller: `box` is the proposed world AABB of the selection and `edges` the dragged
 // edges (both objects are reused between calls: do not keep them). Returns the correction to ADD to
-// the dragged edges.
+// the snapped edge. Resizing about the centre flags both edges of an axis: `edgeX` / `edgeY` then say
+// which of the two the correction belongs to (absent: the dragged one).
 export type Snapper = (
   box: Box,
   edges: { left?: boolean; right?: boolean; top?: boolean; bottom?: boolean },
-) => { dx: number; dy: number };
+) => { dx: number; dy: number; edgeX?: 'min' | 'max'; edgeY?: 'min' | 'max' };
 
 // New geometry of one element.
 export interface GeometryPatch {
@@ -119,6 +120,14 @@ function solveResize(
     S.h = n;
     S.t = placeAxis(fy, h, n, alt, false);
   }
+}
+
+// The pointer shift that moves a snapped edge by `delta`. Resizing about the centre can snap the edge
+// opposite the dragged one (`edge` min / max against the dragged direction `dir`, -1 min / +1 max): it
+// moves the other way as the pointer does.
+function pointerShift(delta: number, edge: 'min' | 'max' | undefined, dir: number): number {
+  if (edge === undefined || dir === 0) return delta;
+  return (edge === 'min') === dir < 0 ? delta : -delta;
 }
 
 export class ResizeSession {
@@ -259,7 +268,11 @@ export class ResizeSession {
       const dirY = Math.round(this.fx * it.sin + this.fy * it.cos);
       this.setEdges(dirX, dirY, mods.alt);
       const c = snap(b, this.snapEdges);
-      if (c.dx !== 0 || c.dy !== 0) this.solveSingle(it, px + c.dx, py + c.dy, mods);
+      if (c.dx !== 0 || c.dy !== 0) {
+        const dx = pointerShift(c.dx, c.edgeX, dirX);
+        const dy = pointerShift(c.dy, c.edgeY, dirY);
+        this.solveSingle(it, px + dx, py + dy, mods);
+      }
     }
     this.solvedCenter(it, this.centre);
     const p = it.patch;
@@ -305,7 +318,11 @@ export class ResizeSession {
       b.maxY = b.minY + S.h;
       this.setEdges(this.fx, this.fy, mods.alt);
       const c = snap(b, this.snapEdges);
-      if (c.dx !== 0 || c.dy !== 0) this.solveMulti(px + c.dx, py + c.dy, mods);
+      if (c.dx !== 0 || c.dy !== 0) {
+        const dx = pointerShift(c.dx, c.edgeX, this.fx);
+        const dy = pointerShift(c.dy, c.edgeY, this.fy);
+        this.solveMulti(px + dx, py + dy, mods);
+      }
     }
     const s = this.bw > 0 ? S.w / this.bw : 1;
     const left = this.bx + S.l;

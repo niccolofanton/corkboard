@@ -47,4 +47,30 @@ describe('SnapSession', () => {
     expect(r.dx).toBeCloseTo(-1);
     expect(r.dy).toBe(0);
   });
+
+  it('names the edge a symmetric resize snapped to a guide', () => {
+    const store = new Store();
+    store.add([createElement({ x: -103, y: 500, w: 100, h: 100, media: { src: 'a' } }, 'a')]);
+    const s = new SnapSession({ guides: true, grid: false }, 24);
+    s.begin(store, { x0: -500, y0: 0, x1: 1000, y1: 1000 }, 1, new Set());
+    // Both edges of x are flagged: only the west one (x = 0) is within reach of the line x = -3.
+    const r = s.resize(box(0, 0, 100, 100), { left: true, right: true });
+    expect(r.dx).toBeCloseTo(-3);
+    expect(r.edgeX).toBe('min');
+    expect(r.edgeY).toBeUndefined();
+  });
+
+  it('snaps the nearer flagged edge to the grid and names it', () => {
+    const store = new Store();
+    const s = new SnapSession({ guides: false, grid: true }, 24);
+    s.begin(store, view, 1, new Set());
+    // West edge at 5 is 5 from the grid line 0; east edge at 97 is 1 from 96.
+    const east = s.resize(box(5, 0, 92, 50), { left: true, right: true });
+    expect(east.dx).toBeCloseTo(-1);
+    expect(east.edgeX).toBe('max');
+    // West edge at 1 is 1 from 0; east edge at 98 is 2 from 96.
+    const west = s.resize(box(1, 0, 97, 50), { left: true, right: true });
+    expect(west.dx).toBeCloseTo(-1);
+    expect(west.edgeX).toBe('min');
+  });
 });

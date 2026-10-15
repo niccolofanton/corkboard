@@ -45,7 +45,10 @@ function make(options: InteractionOptions = {}, locked = true) {
   // A card at (0, 0, 100, 100); the rest of the plane is empty canvas.
   store.add([createElement({ x: 0, y: 0, w: 100, h: 100, locked, media: { src: 'a.jpg' } }, 'a')]);
   const pointer = (type: string, x: number, y: number, init: MouseEventInit = {}) => {
-    const e = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, ...init });
+    // A mouse with its button held reports `buttons: 1` on every move; a move with none is the pointer
+    // after a lost pointerup (the controller ends the gesture there).
+    const buttons = type === 'pointerup' || type === 'pointercancel' ? 0 : 1;
+    const e = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, buttons, ...init });
     Object.defineProperty(e, 'pointerId', { value: 1 });
     Object.defineProperty(e, 'pointerType', { value: 'mouse' });
     host.dispatchEvent(e);

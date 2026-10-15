@@ -34,13 +34,21 @@ export interface SnapSettings {
 
 export const DEFAULT_SNAPPING: SnapSettings = { guides: true, grid: false };
 
+// What a resize snap asks of the caller: see `SnapSession.resize`.
+export interface ResizeSnap {
+  dx: number;
+  dy: number;
+  edgeX?: 'min' | 'max';
+  edgeY?: 'min' | 'max';
+  guides: readonly Guide[];
+}
+
 const isAxis = (g: Guide, axis: 'x' | 'y'): boolean => g.axis === axis;
 
 export class SnapSession {
   private index: SnapIndex | null = null;
   private zoom = 1;
   private readonly result: SnapResult = { dx: 0, dy: 0, guides: [] };
-  private readonly out = { dx: 0, dy: 0 };
   private readonly hits: Element[] = [];
 
   constructor(
@@ -102,11 +110,14 @@ export class SnapSession {
     return { dx, dy, guides };
   }
 
-  // The correction to add to the dragged edges of a box being resized.
-  resize(box: Box, edges: ResizeEdges): { dx: number; dy: number; guides: readonly Guide[] } {
+  // The correction to add to the dragged edges of a box being resized. A symmetric resize flags both
+  // edges of an axis: `edgeX` / `edgeY` then say which one the correction belongs to.
+  resize(box: Box, edges: ResizeEdges): ResizeSnap {
     const threshold = SNAP_THRESHOLD_PX / this.zoom;
     let dx = 0;
     let dy = 0;
+    let edgeX: 'min' | 'max' | undefined;
+    let edgeY: 'min' | 'max' | undefined;
     let guides: readonly Guide[] = [];
     if (this.index) {
       const r = snapResize(
@@ -119,26 +130,41 @@ export class SnapSession {
       );
       dx = r.dx;
       dy = r.dy;
+      edgeX = r.edgeX;
+      edgeY = r.edgeY;
       guides = r.guides;
     }
     if (this.settings.grid) {
       if (!guides.some((g) => isAxis(g, 'x'))) {
-        const ex = edges.left ? box.minX : edges.right ? box.maxX : null;
-        if (ex !== null) {
-          const gx = this.gridDelta(ex);
-          if (Math.abs(gx) <= threshold) dx = gx;
+        const g = this.gridEdge(box.minX, box.maxX, edges.left, edges.right, threshold);
+        if (g) {
+          dx = g.delta;
+          edgeX = g.edge;
         }
       }
       if (!guides.some((g) => isAxis(g, 'y'))) {
-        const ey = edges.top ? box.minY : edges.bottom ? box.maxY : null;
-        if (ey !== null) {
-          const gy = this.gridDelta(ey);
-          if (Math.abs(gy) <= threshold) dy = gy;
+        const g = this.gridEdge(box.minY, box.maxY, edges.top, edges.bottom, threshold);
+        if (g) {
+          dy = g.delta;
+          edgeY = g.edge;
         }
       }
     }
-    this.out.dx = dx;
-    this.out.dy = dy;
-    return { dx, dy, guides };
+    return { dx, dy, edgeX, edgeY, guides };
+  }
+
+  // The grid correction of the flagged edge of an axis (the nearer one when both are), within the threshold.
+  private gridEdge(
+    min: number,
+    max: number,
+    lo: boolean | undefined,
+    hi: boolean | undefined,
+    threshold: number,
+  ): { delta: number; edge: 'min' | 'max' } | null {
+    const a = lo ? this.gridDelta(min) : Infinity;
+    const b = hi ? this.gridDelta(max) : Infinity;
+    const delta = Math.abs(a) <= Math.abs(b) ? a : b;
+    if (!(Math.abs(delta) <= threshold)) return null;
+    return { delta, edge: delta === a ? 'min' : 'max' };
   }
 }

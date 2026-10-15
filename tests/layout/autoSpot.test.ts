@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { autoSpot, shouldPanTo } from '../../src/layout';
+import { autoSpot, autoSpotArea, shouldPanTo } from '../../src/layout';
 import type { Box } from '../../src/interact/geometry';
 
 const box = (minX: number, minY: number, maxX: number, maxY: number): Box => ({
@@ -141,6 +141,61 @@ describe('autoSpot', () => {
     const spot = autoSpot({ w: 1000, h: 1000 }, v, occupied);
     const placed = box(spot.x, spot.y, spot.x + 1000, spot.y + 1000);
     expect(occupied.some((o) => overlaps(placed, o))).toBe(false);
+  });
+});
+
+describe('autoSpot with an unusable viewport', () => {
+  const block = { w: 200, h: 100 };
+  const finite = (p: { x: number; y: number }): boolean => Number.isFinite(p.x) && Number.isFinite(p.y);
+
+  it('returns a finite spot for a NaN viewport instead of searching for ever', () => {
+    const nan = box(NaN, NaN, NaN, NaN);
+    expect(finite(autoSpot(block, nan, [box(0, 0, 10, 10)]))).toBe(true);
+    expect(autoSpot(block, nan, [])).toEqual({ x: 0, y: 0 });
+  });
+
+  it('returns a finite spot for an infinite viewport, a NaN block or a NaN radius', () => {
+    expect(finite(autoSpot(block, box(0, 0, Infinity, 800), []))).toBe(true);
+    expect(finite(autoSpot(block, box(-Infinity, -Infinity, Infinity, Infinity), []))).toBe(true);
+    expect(finite(autoSpot({ w: NaN, h: 100 }, box(0, 0, 1000, 800), []))).toBe(true);
+    expect(finite(autoSpot(block, box(0, 0, 1000, 800), [], { maxRadiusFactor: NaN }))).toBe(true);
+  });
+});
+
+describe('autoSpotArea', () => {
+  it('is everything the search can reach: the radius around the centred block, and the block', () => {
+    // Block 200 x 100 centred on (500, 400): top-left (400, 350). 2 diagonals = 2561 px: 53 rings of 48.
+    const a = autoSpotArea({ w: 200, h: 100 }, box(0, 0, 1000, 800));
+    expect(a).toEqual({ minX: 400 - 2544, minY: 350 - 2544, maxX: 600 + 2544, maxY: 450 + 2544 });
+  });
+
+  it('reaches the whole radius when the step grows for a huge viewport', () => {
+    const v = box(0, 0, 100_000, 100_000);
+    const radius = 2 * Math.hypot(100_000, 100_000);
+    const a = autoSpotArea({ w: 10, h: 10 }, v, {});
+    expect(a.minX).toBeCloseTo(50_000 - 5 - radius, 3);
+    expect(a.maxX).toBeCloseTo(50_000 + 5 + radius, 3);
+  });
+
+  it('holds every box that can block a candidate: a free hole found at the edge of the reach', () => {
+    const v = box(0, 0, 1000, 600);
+    const blk = { w: 100, h: 100 };
+    // Cards everywhere inside the reach but a 200 x 200 hole near the end of it.
+    const all: Box[] = [];
+    for (let x = -2200; x < 3000; x += 100) {
+      for (let y = -2200; y < 2800; y += 100) {
+        if (x >= 2000 && x < 2200 && y >= 200 && y < 400) continue;
+        all.push(box(x, y, x + 100, y + 100));
+      }
+    }
+    const area = autoSpotArea(blk, v);
+    const inside = all.filter(
+      (b) => b.minX <= area.maxX && b.maxX >= area.minX && b.minY <= area.maxY && b.maxY >= area.minY,
+    );
+    const spot = autoSpot(blk, v, inside);
+    expect(spot.x).toBeGreaterThanOrEqual(2000);
+    expect(spot.x + 100).toBeLessThanOrEqual(2200);
+    expect(all.some((o) => overlaps(box(spot.x, spot.y, spot.x + 100, spot.y + 100), o))).toBe(false);
   });
 });
 
