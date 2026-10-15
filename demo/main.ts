@@ -323,7 +323,9 @@ async function main(): Promise<void> {
 
   const board = await Corkboard.create($('board'), {
     theme: 'dark',
-    video: { mode: 'always' },
+    // The library only spends a stream on a card at least 160 px on screen. The demo opens on the whole board,
+    // where a card is about 30 px: let the clips play from there (still at most 8 at once).
+    video: { mode: 'always', minPlayPx: 24 },
     snapping: { guides: true, grid: false },
     embeds: { resolve: resolveEmbed },
   });
