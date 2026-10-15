@@ -16,12 +16,17 @@ export interface AtlasCell<P> {
   // Top-left of the cell's usable area (gutter already skipped), in page pixels.
   x: number;
   y: number;
+  // The cell held another occupant before: its pixels are still in the page, so an upload that does not
+  // cover the whole cell has to clear the rest.
+  reused: boolean;
 }
 
 interface PageState<P> {
   page: P;
   used: number;
   free: number[];
+  // Per cell: handed out at least once (the page starts out empty, so a cell never used needs no clearing).
+  touched: Uint8Array;
 }
 
 export function cellsPerRow(spec: AtlasSpec): number {
@@ -65,11 +70,13 @@ export class Atlas<P> {
       // Highest index first, so `pop()` hands cells out in reading order.
       const free: number[] = [];
       for (let i = n - 1; i >= 0; i--) free.push(i);
-      st = { page: this.createPage(), used: 0, free };
+      st = { page: this.createPage(), used: 0, free, touched: new Uint8Array(n) };
       this.pages.push(st);
     }
     const index = st.free.pop() as number;
     st.used++;
+    const reused = st.touched[index] === 1;
+    st.touched[index] = 1;
     const col = index % this.perRow;
     const row = Math.floor(index / this.perRow);
     return {
@@ -77,6 +84,7 @@ export class Atlas<P> {
       index,
       x: col * this.stride + this.spec.gutter,
       y: row * this.stride + this.spec.gutter,
+      reused,
     };
   }
 

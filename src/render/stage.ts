@@ -74,6 +74,10 @@ export const GRID = 24;
 const VIEW_MARGIN = 0.1;
 // Time a tick may spend creating views for elements that entered the viewport (ms).
 const MOUNT_BUDGET_MS = 5;
+// The rounded corners are baked in texels from the card's world size, so a resize scales them too: the corner
+// drawn is radius * long / bakedLong. Up to this far off (world px) is left alone; past it the card is baked
+// again, which shows its placeholder for a moment. A square-cornered card never needs it.
+const BAKE_CORNER_SLACK = 1;
 
 const pct = (a: Float32Array, n: number, p: number): number => {
   if (n === 0) return 0;
@@ -81,6 +85,17 @@ const pct = (a: Float32Array, n: number, p: number): number => {
   return s[Math.min(n - 1, Math.floor((n - 1) * p))];
 };
 const r2 = (n: number): number => Math.round(n * 100) / 100;
+
+function sameBytes(a: Uint8Array | undefined, b: Uint8Array | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// The results of `contentBounds` that stand for "nothing there" (a fresh rect each, so the public API keeps
+// its shape): a fit of one of them is a no-op instead of a zoom onto the origin.
+const noContent = new WeakSet<Rect>();
 
 // Base64 (standard or url-safe) -> bytes.
 function decodeBase64(s: string): Uint8Array {
@@ -157,6 +172,8 @@ export class Stage {
   private slotLevel: Int8Array = new Int8Array(64);
   private slotOnScreen: Uint8Array = new Uint8Array(64);
   private slotOwn: Uint8Array = new Uint8Array(64);
+  // Per slot: the long side (world px) the card's textures were last baked at (see BAKE_CORNER_SLACK).
+  private slotBaked: Float32Array = new Float32Array(64);
   private l0Missing = 0;
   // Decoded ThumbHash bytes of base64 strings, by string.
   private readonly hashCache = new Map<string, Uint8Array>();
@@ -181,6 +198,10 @@ export class Stage {
   private beforeHooks: (() => void)[] = [];
   private frameHooks: ((camChanged: boolean) => void)[] = [];
   private settleHooks: (() => void)[] = [];
+  // Hooks that threw and were already reported (once each: a hook that throws every frame must not flood).
+  private readonly reportedHooks = new WeakSet<object>();
+  // Watches the page's pixel ratio: a media query for the current value, re-armed after every change.
+  private dprQuery: MediaQueryList | null = null;
   // Frames that threw and were healed by rebuilding the textures (never reset).
   private renderErrorsTotal = 0;
   // Which step of the tick is running (names the step in a recovered error).
@@ -193,6 +214,7 @@ export class Stage {
   private l1CompleteMs: number | null = null;
   private counters = {
     renderErrors: 0,
+    hookErrors: 0,
     rafCalls: 0,
     ticks: 0,
     renders: 0,
@@ -329,7 +351,11 @@ export class Stage {
       const empty = Math.round(r.width) < 1 || Math.round(r.height) < 1;
       const w = Math.max(1, Math.round(r.width));
       const h = Math.max(1, Math.round(r.height));
-      if (w === this.cam.width && h === this.cam.height && empty === this.cam.isEmpty) return;
+      // Browser zoom resizes the host too: take the pixel ratio along with the size.
+      const dprChanged = this.setDpr(window.devicePixelRatio || 1);
+      if (!dprChanged && w === this.cam.width && h === this.cam.height && empty === this.cam.isEmpty) {
+        return;
+      }
       this.renderer.resize(w, h, this.dpr);
       this.bg.width = w;
       this.bg.height = h;
@@ -347,7 +373,48 @@ export class Stage {
     this.ro = new ResizeObserver(measure);
     this.ro.observe(host);
     this.bindContextLoss();
+    this.watchDpr();
+    this.cleanups.push(() => this.unwatchDpr());
   }
+
+  // Adopts a new device pixel ratio (browser zoom, a window dragged to another screen). Returns whether it
+  // changed. The LOD levels follow device px, so the cull window and the levels are asked for again.
+  private setDpr(dpr: number): boolean {
+    if (dpr === this.dpr) return false;
+    this.dpr = dpr;
+    this.ctx.dpr = dpr;
+    this.overlay.setDpr(dpr);
+    this.mountedWin = null;
+    this.lodDirty = true;
+    this.dirty = true;
+    return true;
+  }
+
+  // A media query for the current ratio only fires when it stops matching, so it is armed again for the new
+  // value after every change.
+  private watchDpr(): void {
+    this.unwatchDpr();
+    if (typeof matchMedia !== 'function') return;
+    const mq = matchMedia(`(resolution: ${this.dpr}dppx)`);
+    mq.addEventListener('change', this.onDprChange);
+    this.dprQuery = mq;
+  }
+
+  private unwatchDpr(): void {
+    this.dprQuery?.removeEventListener('change', this.onDprChange);
+    this.dprQuery = null;
+  }
+
+  private onDprChange = (): void => {
+    if (this.disposed) return;
+    const changed = this.setDpr(window.devicePixelRatio || 1);
+    this.watchDpr();
+    if (!changed) return;
+    this.renderer.resize(this.cam.width, this.cam.height, this.dpr);
+    // Resizing clears the drawing buffer (see `measure`).
+    if (!this.lost) this.render();
+    this.requestFrame();
+  };
 
   get activeTheme(): Theme {
     return this.theme;
@@ -386,10 +453,10 @@ export class Stage {
       this.pendingUpdated.delete(el.id);
       this.pendingRemoved.set(el.id, el);
     }
-    for (const el of c.added) {
-      this.pendingRemoved.delete(el.id);
-      this.pendingAdded.add(el.id);
-    }
+    // An id removed and added again before the tick keeps its pending removal: the flush unmounts the old
+    // view (and frees its slot) before it mounts the new element, so none of the old geometry or picture
+    // survives into the new card.
+    for (const el of c.added) this.pendingAdded.add(el.id);
     for (const u of c.updated) {
       if (this.pendingAdded.has(u.el.id)) continue;
       let set = this.pendingUpdated.get(u.el.id);
@@ -429,13 +496,18 @@ export class Stage {
     }
     const win = this.mountedWin;
     if (this.pendingAdded.size > 0) {
+      // Before the first cull pass there is no window to test against: the adds wait in the mount queue,
+      // which that pass (this same tick) filters, rather than all getting a view.
+      const view = win ? null : this.cam.visibleRect();
       for (const id of this.pendingAdded) {
         const el = store.get(id);
         if (!el || this.views.has(id)) continue;
         if (definitionOf(el.kind).textured) this.allocSlot(id);
-        if (this.forceMount(id) || !win || this.inWindow(el, win)) {
+        if (this.forceMount(id) || (win && this.inWindow(el, win))) {
           this.mount(el);
           changed = true;
+        } else if (view) {
+          this.enqueueMount(el, (view.x0 + view.x1) / 2, (view.y0 + view.y1) / 2);
         }
       }
       this.pendingAdded.clear();
@@ -451,6 +523,9 @@ export class Stage {
           if (win && this.inWindow(el, win)) {
             this.mount(el);
             changed = true;
+          } else {
+            // Not mounted, but its slot may hold a card (and textures) of the old media.
+            this.syncSlot(id, el);
           }
           continue;
         }
@@ -498,6 +573,10 @@ export class Stage {
       view.update(el, all, this.rectOf(el), this.ctx);
       if (view instanceof MediaView) this.syncCard(view, el);
     }
+    // Slots without a view keep their cards across a reload too: the new store may hold other media.
+    for (const [id, slot] of this.slotOf) {
+      if (!this.slotView[slot]) this.syncSlot(id, store.get(id) as Element);
+    }
     if (first) {
       this.t0 = performance.now();
       this.firstPaintMs = null;
@@ -529,6 +608,7 @@ export class Stage {
     this.slotLevel[s] = -1;
     this.slotOnScreen[s] = 0;
     this.slotOwn[s] = 0;
+    this.slotBaked[s] = 0;
     this.slotCard[s] = null;
     this.slotView[s] = null;
     return s;
@@ -543,9 +623,12 @@ export class Stage {
     on.set(this.slotOnScreen);
     const own = new Uint8Array(n);
     own.set(this.slotOwn);
+    const baked = new Float32Array(n);
+    baked.set(this.slotBaked);
     this.slotLevel = lv;
     this.slotOnScreen = on;
     this.slotOwn = own;
+    this.slotBaked = baked;
   }
 
   private freeSlot(id: ElementId): void {
@@ -597,6 +680,7 @@ export class Stage {
       radius: DEFAULTS.cardRadius,
     };
     this.fillCard(card, el);
+    this.slotBaked[slot] = Math.max(el.w, el.h);
     return card;
   }
 
@@ -606,33 +690,54 @@ export class Stage {
     if (!card) {
       card = this.newCard(slot, el);
       this.slotCard[slot] = card;
-    } else this.fillCard(card, el);
+    } else this.refreshCard(card, el);
     view.card = card;
     this.slotView[slot] = view;
     this.mediaViews.add(view);
   }
 
-  // The element's size or media changed: keep the BoardCard current. A rendition URL that CHANGED (not
-  // just appeared) makes whatever is resident stale.
-  private syncCard(view: MediaView, el: Element): void {
-    const card = view.card;
-    if (!card) return;
+  // Brings a slot's BoardCard up to date with its element and returns whether what is resident for it went
+  // stale (and was forgotten). A rendition URL or ThumbHash that CHANGED (not just appeared) means another
+  // picture; a different corner radius, or a long side so far from the size the textures were baked at that
+  // the corners drawn are off by more than BAKE_CORNER_SLACK, means the baked rounded corners no longer fit.
+  // Only committed store changes get here: a live drag / resize preview never touches the card.
+  private refreshCard(card: BoardCard, el: Element): boolean {
     const m = el.media;
     const l1 = m.sizes?.small ?? m.src;
     const l2 = m.sizes?.medium ?? m.src;
     const l3 = m.sizes?.large ?? m.src;
+    const long = Math.max(el.w, el.h);
+    const baked = this.slotBaked[card.id];
     const stale =
       (card.l1Url !== undefined && card.l1Url !== l1) ||
       (card.l2Url !== undefined && card.l2Url !== l2) ||
       (card.l3Url !== undefined && card.l3Url !== l3) ||
-      card.radius !== el.radius;
+      (card.thumbhash !== undefined && !sameBytes(card.thumbhash, this.hashOf(m.thumbhash))) ||
+      card.radius !== el.radius ||
+      (baked > 0 && (el.radius * Math.abs(long - baked)) / baked > BAKE_CORNER_SLACK);
     this.fillCard(card, el);
     if (stale) {
       this.tm.forget(card.id);
       this.slotLevel[card.id] = -1;
-      view.setTexture(null, -1, this.ctx);
+      this.slotBaked[card.id] = long;
       this.l0Missing++;
     }
+    return stale;
+  }
+
+  // The element's size or media changed: keep the BoardCard current, and show the placeholder again when
+  // what was resident went stale.
+  private syncCard(view: MediaView, el: Element): void {
+    const card = view.card;
+    if (card && this.refreshCard(card, el)) view.setTexture(null, -1, this.ctx);
+  }
+
+  // The same for a slot that has no view (the element is off screen): its card, and the textures its ThumbHash
+  // and thumbnails already got, must not outlive a change of media.
+  private syncSlot(id: ElementId, el: Element): void {
+    const slot = this.slotOf.get(id);
+    const card = slot === undefined ? null : this.slotCard[slot];
+    if (card) this.refreshCard(card, el);
   }
 
   // ── Views ──────────────────────────────────────────────────────────────────
@@ -648,6 +753,16 @@ export class Stage {
   private inWindow(el: Element, win: Rect): boolean {
     const b = elementBox(el);
     return b.minX <= win.x1 && b.maxX >= win.x0 && b.minY <= win.y1 && b.maxY >= win.y0;
+  }
+
+  // Puts an element in the mount queue, ordered by its distance from the view centre (cx, cy).
+  private enqueueMount(el: Element, cx: number, cy: number): void {
+    if (this.queued.has(el.id)) return;
+    const b = elementBox(el);
+    const d = Math.hypot((b.minX + b.maxX) / 2 - cx, (b.minY + b.maxY) / 2 - cy);
+    this.mountQueue.push({ id: el.id, key: d });
+    this.queued.add(el.id);
+    this.queueSorted = false;
   }
 
   // Creates the views of queued elements until the tick's budget is spent. Anything that left the window
@@ -847,19 +962,31 @@ export class Stage {
         any = true;
       }
     }
-    return any
-      ? { x0: b.minX, y0: b.minY, x1: b.maxX, y1: b.maxY }
-      : { x0: 0, y0: 0, x1: 1, y1: 1 };
+    if (any) return { x0: b.minX, y0: b.minY, x1: b.maxX, y1: b.maxY };
+    // Nothing resolved: a unit rect at the origin (the public shape), remembered as "no content" so a fit
+    // of it does nothing.
+    const none = { x0: 0, y0: 0, x1: 1, y1: 1 };
+    noContent.add(none);
+    return none;
   }
 
   fit(animate = true, pad = 48): void {
-    this.cam.requestFit(() => this.contentBounds(), pad, animate);
+    this.cam.requestFit(this.fitTarget(() => this.contentBounds()), pad, animate);
   }
 
   // `r` may be a function: it is read when the fit is applied (a fit asked for on a host that has no size
   // yet waits for the first real size).
   fitRect(r: Rect | (() => Rect), animate = true, pad = 48): void {
-    this.cam.requestFit(typeof r === 'function' ? r : () => r, pad, animate, 440);
+    this.cam.requestFit(this.fitTarget(r), pad, animate, 440);
+  }
+
+  // What a fit reads: the rect, or null for the "no content" rect of `contentBounds` (an empty board, ids
+  // that match no card), which leaves the camera alone.
+  private fitTarget(r: Rect | (() => Rect)): () => Rect | null {
+    return () => {
+      const rect = typeof r === 'function' ? r() : r;
+      return noContent.has(rect) ? null : rect;
+    };
   }
 
   zoomToActual(): void {
@@ -890,6 +1017,8 @@ export class Stage {
     this.theme = theme;
     this.ctx.theme = theme;
     this.applyThemeToScene();
+    // The dots' opacity is the theme's (derived with the camera), not only the tint.
+    this.applyCamera();
     this.overlay.setTheme(theme);
     for (const v of this.views.values()) v.refresh(this.ctx);
     if (borderChanged) {
@@ -978,7 +1107,7 @@ export class Stage {
     this.counters.ticks++;
     const dt = this.lastTs ? Math.min(50, ts - this.lastTs) : 16.7;
     this.lastTs = ts;
-    for (const h of this.beforeHooks) h();
+    for (const h of this.beforeHooks) this.runHook(h);
     const camBusy = this.cam.step(dt);
     let dirty = this.dirty;
     this.dirty = false;
@@ -1003,7 +1132,10 @@ export class Stage {
         this.applyCamera();
         dirty = true;
         camChanged = true;
-        if (t0 - this.lastLod >= LOD_INTERVAL_MS) this.cullAndLod(t0, false);
+        // No window yet (first tick, a resize): the mount queue needs one before it drains.
+        if (t0 - this.lastLod >= LOD_INTERVAL_MS || this.mountedWin === null) {
+          this.cullAndLod(t0, false);
+        }
       } else if (this.lodDirty) {
         this.cullAndLod(t0, false);
       }
@@ -1028,7 +1160,9 @@ export class Stage {
       if (this.overlay.draw(this.cam.cam)) dirty = true;
       lap('overlay');
       this.where = 'hooks';
-      for (const h of this.frameHooks) h(camChanged);
+      // A hook is host / layer code: a throw there says nothing about the textures, so it is reported on
+      // its own and never reaches `recoverTextures`.
+      for (const h of this.frameHooks) this.runHook(h, camChanged);
       this.where = 'render';
       if (dirty && !this.lost) {
         this.render();
@@ -1056,7 +1190,7 @@ export class Stage {
       if (this.slowTicks.length > 40) this.slowTicks.shift();
     }
 
-    if (camBusy || this.tm.pendingWork || this.lodDirty || this.dirty || this.mountQueue.length > 0) {
+    if (camBusy || this.uploadsPending() || this.lodDirty || this.dirty || this.mountQueue.length > 0) {
       this.requestFrame();
     } else {
       // Parked: no rAF until the next input or decode. One timer runs the exact cull + LOD pass
@@ -1072,11 +1206,30 @@ export class Stage {
     this.cullAndLod(performance.now(), true);
     // Everything retired has been through at least one render by now.
     this.tm.flushRetired();
-    for (const h of this.settleHooks) h();
-    if (this.dirty || this.tm.pendingWork || this.mountQueue.length > 0) {
+    for (const h of this.settleHooks) this.runHook(h);
+    if (this.dirty || this.uploadsPending() || this.mountQueue.length > 0) {
       this.requestFrame();
     }
   };
+
+  // Decoded bitmaps wait for the upload step. While the GL context is lost that step is skipped, so they
+  // cannot keep the loop spinning: the restore (`dropAllTextures`) starts it again.
+  private uploadsPending(): boolean {
+    return this.tm.pendingWork && !this.lost;
+  }
+
+  // Runs a hook so that one that throws neither stops the others nor the loop. Reported once per hook
+  // (console), counted every time (`hookErrors` in the stats).
+  private runHook(hook: (arg: boolean) => void, arg = false): void {
+    try {
+      hook(arg);
+    } catch (e) {
+      this.counters.hookErrors++;
+      if (this.reportedHooks.has(hook)) return;
+      this.reportedHooks.add(hook);
+      console.error('[corkboard] a hook threw (reported once per hook):', e);
+    }
+  }
 
   private render(): void {
     const t = performance.now();
@@ -1157,12 +1310,7 @@ export class Stage {
         v.mark = stamp;
         already++;
       } else if (!this.queued.has(el.id)) {
-        const b = elementBox(el);
-        const d = Math.hypot((b.minX + b.maxX) / 2 - cx, (b.minY + b.maxY) / 2 - cy);
-        // By distance from the view centre.
-        this.mountQueue.push({ id: el.id, key: d });
-        this.queued.add(el.id);
-        this.queueSorted = false;
+        this.enqueueMount(el, cx, cy);
         entered++;
       }
     }
@@ -1390,6 +1538,7 @@ export class Stage {
     this.nGpu = 0;
     this.counters = {
       renderErrors: 0,
+      hookErrors: 0,
       rafCalls: 0,
       ticks: 0,
       renders: 0,
@@ -1509,7 +1658,10 @@ export class Stage {
     this.ro.disconnect();
     this.tm.dispose();
     this.pools.dispose();
+    const dots = this.bg.texture;
     this.app.destroy(true, { children: true, texture: false });
+    // `texture: false` leaves the dot texture to us (it is ours alone, never shared).
+    dots.destroy(true);
     this.unparkTicker();
   }
 
@@ -1522,7 +1674,8 @@ export class Stage {
     g.beginPath();
     g.arc(32, 32, 3, 0, Math.PI * 2);
     g.fill();
-    const tex = Texture.from(c);
+    // Not in Pixi's global texture cache (it would keep the canvas and texture alive past the board).
+    const tex = Texture.from(c, true);
     return new TilingSprite({ texture: tex, width: 1, height: 1 });
   }
 }

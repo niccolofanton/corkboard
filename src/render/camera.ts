@@ -54,7 +54,7 @@ export class CameraController {
   // The host has no size yet (hidden tab, pane not laid out): the viewport is a 1 px placeholder.
   private empty = false;
   // A fit asked for while `empty`; `version` is the camera version it was asked at.
-  private pendingFit: { target: () => Rect; pad: number; version: number } | null = null;
+  private pendingFit: { target: () => Rect | null; pad: number; version: number } | null = null;
 
   constructor(
     private readonly wake: () => void,
@@ -78,7 +78,10 @@ export class CameraController {
       return;
     }
     this.pendingFit = null;
-    if (untouched) this.jumpTo(this.fitCamera(p.target(), p.pad));
+    if (untouched) {
+      const r = p.target();
+      if (r) this.jumpTo(this.fitCamera(r, p.pad));
+    }
   }
 
   // The host has no size (yet): see setViewport.
@@ -221,25 +224,38 @@ export class CameraController {
 
   // Fits `target` in the viewport. With an empty viewport (see setViewport) it would compute the minimum
   // zoom and leave the board off-centre: the request is kept and applied at the first real size instead.
-  // `target` is read when the fit is applied, so cards added meanwhile count.
-  requestFit(target: () => Rect, pad = 48, animate = true, duration?: number): void {
+  // `target` is read when the fit is applied, so cards added meanwhile count. A target of `null` (nothing
+  // to fit: an empty board, ids that match no card) leaves the camera where it is.
+  requestFit(target: () => Rect | null, pad = 48, animate = true, duration?: number): void {
     if (this.empty) {
       this.pendingFit = { target, pad, version: this.version };
       return;
     }
+    const r = target();
+    if (!r) return;
     this.pendingFit = null;
-    const c = this.fitCamera(target(), pad);
+    const c = this.fitCamera(r, pad);
     if (animate) this.flyTo(c, duration);
     else this.jumpTo(c);
+  }
+
+  // `c` with its scale held to the zoom range. The tx / ty of `c` were made for the scale that was asked
+  // for, so a clamped scale zooms about the viewport centre: the world point that sat there under `c`
+  // stays there (without this the camera would land off-centre by the whole clamped factor).
+  private clampCamera(c: Camera): Camera {
+    const scale = clamp(c.scale, this.bounds.min, this.bounds.max);
+    if (scale === c.scale || !(c.scale > 0 && Number.isFinite(c.scale))) return { ...c, scale };
+    return zoomAt(c, this.width / 2, this.height / 2, scale);
   }
 
   jumpTo(c: Camera): void {
     this.pendingFit = null;
     this.fly = null;
     this.vel.vx = this.vel.vy = 0;
-    this.cam.tx = c.tx;
-    this.cam.ty = c.ty;
-    this.cam.scale = this.targetScale = clamp(c.scale, this.bounds.min, this.bounds.max);
+    const k = this.clampCamera(c);
+    this.cam.tx = k.tx;
+    this.cam.ty = k.ty;
+    this.cam.scale = this.targetScale = k.scale;
     this.version++;
     this.wake();
   }
@@ -251,7 +267,7 @@ export class CameraController {
     this.targetScale = this.cam.scale;
     this.fly = {
       from: { ...this.cam },
-      to: { ...c, scale: clamp(c.scale, this.bounds.min, this.bounds.max) },
+      to: this.clampCamera(c),
       t: 0,
       duration,
     };

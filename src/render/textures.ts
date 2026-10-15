@@ -123,6 +123,13 @@ export function absoluteUrl(url: string | undefined): string | undefined {
 }
 
 const key = (card: BoardCard, level: Level): number => card.id * 4 + level;
+
+// Zeros to blank part of an atlas cell (grown on demand, shared: it is only ever read).
+let zeros = new Uint8Array(0);
+function clearBuffer(bytes: number): Uint8Array {
+  if (zeros.length < bytes) zeros = new Uint8Array(bytes);
+  return zeros;
+}
 const isOwn = (level: Level): level is 2 | 3 => level >= 2;
 
 export class TextureManager {
@@ -138,6 +145,9 @@ export class TextureManager {
   private readonly failedAt = new Map<number, number>();
   private queue: Req[] = [];
   private decoded: Decoded[] = [];
+  // Keys of `decoded`: a bitmap that left the request books but is not resident until `frame()` uploads it
+  // still counts as present, or the LOD pass (which runs before the upload in a tick) asks for it again.
+  private readonly decodedKeys = new Set<number>();
   // Teardown that must wait until the frames that may still draw the old texture have rendered.
   private readonly retire: RetireQueue;
   // Cards whose texture was just evicted: the stage must re-point their sprites before the next draw.
@@ -333,6 +343,8 @@ export class TextureManager {
           ? !ct?.ownCapped[it.level] && (ct?.ownLong[it.level] ?? 0) < it.bucket
           : false;
       if (resident && !need2) continue;
+      // Decoded and waiting for its upload: on its way, not missing.
+      if (this.decodedKeys.has(k)) continue;
       // Not requestable: no source yet (its URL has not arrived), or a recent failure.
       if (it.level === 0 ? !it.card.thumbhash : !this.urlOf(it.card, it.level)) continue;
       const failed = this.failedAt.get(k);
@@ -460,6 +472,7 @@ export class TextureManager {
       fetched: m.fetched,
       decodeMs: m.decodeMs,
     });
+    this.decodedKeys.add(key(req.card, req.level));
     this.pump();
     this.opts.onWake();
   }
@@ -473,6 +486,7 @@ export class TextureManager {
     let n = 0;
     while (this.decoded.length > 0) {
       const d = this.decoded.shift() as Decoded;
+      this.decodedKeys.delete(key(d.req.card, d.req.level));
       this.upload(d, now);
       changed.push(d.req.card.id);
       n++;
@@ -562,7 +576,7 @@ export class TextureManager {
       ct.tex[level] = null;
     }
     const cell = atlas.alloc();
-    this.uploadCell(cell.page, cell.x, cell.y, bitmap);
+    this.uploadCell(cell, bitmap, w, h, level === 0 ? L0_SPEC.cell : L1_SPEC.cell);
     bitmap.close();
     cell.page.dirty = true;
     ct.cell[level] = cell;
@@ -604,6 +618,13 @@ export class TextureManager {
       }
       this.failedAt.delete(k);
     }
+    // Bitmaps of this card that are decoded but not uploaded yet (a card with nothing resident has them too).
+    this.decoded = this.decoded.filter((d) => {
+      if (d.req.card.id !== id) return true;
+      d.bitmap.close();
+      this.decodedKeys.delete(key(d.req.card, d.req.level));
+      return false;
+    });
     const ct = this.cards.get(id);
     if (!ct) return;
     this.cards.delete(id);
@@ -619,12 +640,6 @@ export class TextureManager {
         if (cell) this.releaseCell(level === 0 ? this.atlas0 : this.atlas1, cell);
       }
     }
-    // Bitmaps of this card that are decoded but not uploaded yet.
-    this.decoded = this.decoded.filter((d) => {
-      if (d.req.card.id !== id) return true;
-      d.bitmap.close();
-      return false;
-    });
   }
 
   // The hairline colour changed with the theme: every texture has it baked in.
@@ -670,13 +685,33 @@ export class TextureManager {
     return glTex;
   }
 
-  private uploadCell(p: Page, x: number, y: number, bitmap: ImageBitmap): void {
+  // `w` x `h` is the bitmap's size, `size` the usable side of a cell.
+  private uploadCell(
+    cell: AtlasCell<Page>,
+    bitmap: ImageBitmap,
+    w: number,
+    h: number,
+    size: number,
+  ): void {
     const gl = this.gl;
-    const glTex = this.bindPage(p);
+    const { x, y } = cell;
+    const glTex = this.bindPage(cell.page);
     // Canvas-born bitmaps are premultiplied, so upload them as such: no conversion, no fringes.
     if (!this.texSys._premultiplyAlpha) {
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
       this.texSys._premultiplyAlpha = true;
+    }
+    // A recycled cell still holds its last occupant: a smaller bitmap leaves that picture in the rest of the
+    // cell, where the bilinear taps and the mips at the edge of the frame would read it. Clear the rest
+    // (the bitmap itself covers the rest of the area; the gutter is never written).
+    if (cell.reused && (w < size || h < size)) {
+      const zero = clearBuffer(size * size * 4);
+      if (w < size) {
+        gl.texSubImage2D(glTex.target, 0, x + w, y, size - w, size, gl.RGBA, gl.UNSIGNED_BYTE, zero);
+      }
+      if (h < size) {
+        gl.texSubImage2D(glTex.target, 0, x, y + h, w, size - h, gl.RGBA, gl.UNSIGNED_BYTE, zero);
+      }
     }
     gl.texSubImage2D(glTex.target, 0, x, y, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
   }
@@ -772,6 +807,7 @@ export class TextureManager {
     this.workerLoad.fill(0);
     for (const d of this.decoded) d.bitmap.close();
     this.decoded = [];
+    this.decodedKeys.clear();
     // Sprites still point at the old textures until the stage re-points them and the next frames have
     // rendered, so tear the old ones down only then (and never touch the new atlases doing it).
     const oldTextures: [Texture, boolean][] = [];

@@ -65,6 +65,23 @@ describe('Atlas', () => {
     expect(atlas.pageCount).toBe(1);
   });
 
+  it('flags a recycled cell as reused (its last occupant is still in the page), a fresh one not', () => {
+    const { atlas } = make();
+    const a = atlas.alloc();
+    const b = atlas.alloc();
+    expect(a.reused).toBe(false);
+    expect(b.reused).toBe(false);
+    atlas.release(a);
+    const c = atlas.alloc();
+    expect(c.index).toBe(a.index);
+    expect(c.reused).toBe(true);
+    // A page that died with its last cell comes back empty: its cells are fresh again.
+    atlas.release(b);
+    atlas.release(c);
+    expect(atlas.pageCount).toBe(0);
+    expect(atlas.alloc().reused).toBe(false);
+  });
+
   it('clear() destroys every page', () => {
     const { atlas, destroyed } = make(L0);
     for (let i = 0; i < 800; i++) atlas.alloc();

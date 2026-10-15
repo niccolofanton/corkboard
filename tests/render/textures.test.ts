@@ -119,3 +119,129 @@ describe('absoluteUrl', () => {
     expect(sent.url).toBe(new URL('img/rel.jpg', document.baseURI).href);
   });
 });
+
+// Uploads against a recording GL stub (no real GPU: only the calls are checked).
+describe('TextureManager decode / upload', () => {
+  const RGBA = 6408;
+  const UBYTE = 5121;
+  type Call = [number, number, number, number, number, number, number, number, unknown];
+  let calls: unknown[][];
+  // The manager under test replaces the suite's stub one (its afterEach disposes it).
+  let um: TextureManager;
+  const bitmap = (w: number, h: number) => ({ width: w, height: h, close: () => {} });
+  const done = (w: FakeWorker, rid: number, bw: number, bh: number) =>
+    w.reply({ op: 'done', rid, bitmap: bitmap(bw, bh), w: bw, h: bh, fetched: 1, decodeMs: 1 });
+  const loads = (w: FakeWorker) => w.sent.filter((m) => m.op === 'load');
+  // Decodes and uploads one level-1 request of `id` (the nth load sent), at the given bitmap size.
+  const land = (id: number, bw: number, bh: number) => {
+    um.setWanted([{ card: card(id), level: 1, dist: 0 }, ...resident]);
+    const w = FakeWorker.all[0];
+    done(w, loads(w).at(-1)!.rid, bw, bh);
+    um.frame(1000, 0);
+  };
+  let resident: WantedItem[];
+
+  beforeEach(() => {
+    calls = [];
+    resident = [];
+    const gl = {
+      RGBA,
+      UNSIGNED_BYTE: UBYTE,
+      UNPACK_PREMULTIPLY_ALPHA_WEBGL: 37441,
+      bindTexture: () => {},
+      pixelStorei: () => {},
+      generateMipmap: () => {},
+      texSubImage2D: (...a: unknown[]) => calls.push(a),
+    };
+    const texSys = {
+      getGlSource: () => ({ target: 3553, texture: {} }),
+      initSource: () => {},
+      _activateLocation: () => {},
+      _setBoundTexture: () => {},
+      _premultiplyAlpha: true,
+    };
+    tm.dispose();
+    FakeWorker.all = [];
+    um = tm = new TextureManager({ texture: texSys, gl } as never, {
+      budgetBytes: 1 << 30,
+      workers: 1,
+      onWake: () => {},
+    });
+  });
+
+  it('does not request a level again while its decoded bitmap waits for the upload', () => {
+    um.setWanted(want(1));
+    const [w] = FakeWorker.all;
+    done(w, loads(w)[0].rid, 100, 80);
+    expect(um.pendingWork).toBe(true);
+    expect(um.queued).toBe(0);
+    expect(um.inflightCount).toBe(0);
+    // The stage's LOD pass runs before the upload step in a tick, so it asks for the level once more.
+    um.setWanted(want(1));
+    expect(loads(w)).toHaveLength(1);
+    expect(um.queued).toBe(0);
+    expect(um.inflightCount).toBe(0);
+    // Uploaded: resident, still asked for nothing.
+    um.frame(1000, 0);
+    expect(um.has(card(1), 1)).toBe(true);
+    um.setWanted(want(1));
+    expect(loads(w)).toHaveLength(1);
+  });
+
+  it('asks again once reset() or forget() dropped the waiting bitmap', () => {
+    um.setWanted(want(1, 2));
+    const [w] = FakeWorker.all;
+    done(w, loads(w)[0].rid, 100, 80);
+    done(w, loads(w)[1].rid, 100, 80);
+    um.forget(1);
+    um.setWanted(want(1, 2));
+    // Card 1's bitmap is gone, so it is wanted again; card 2's still waits.
+    expect(loads(w).map((m) => m.rid)).toHaveLength(3);
+    um.reset();
+    um.setWanted(want(2));
+    expect(loads(w)).toHaveLength(4);
+  });
+
+  it('clears the rest of a recycled atlas cell that a smaller bitmap does not cover', () => {
+    // Card 9 keeps the page alive; card 1 takes cell 0 with a full 128 x 128 bitmap, then goes away.
+    resident = want(9);
+    land(9, 128, 128);
+    land(1, 128, 128);
+    // Two full-size bitmaps in fresh cells: nothing to blank.
+    expect(calls).toHaveLength(2);
+    um.forget(1);
+    um.afterRender();
+    um.afterRender();
+    calls.length = 0;
+    // Card 2 reuses card 1's cell with a 128 x 96 bitmap: the 32 rows under it are blanked first.
+    land(2, 128, 96);
+    const cell = (calls.at(-1) as Call).slice(2, 4) as [number, number];
+    const clear = calls.slice(0, -1) as Call[];
+    expect(clear).toHaveLength(1);
+    expect(clear[0].slice(2, 6)).toEqual([cell[0], cell[1] + 96, 128, 32]);
+    const zeros = clear[0][8] as Uint8Array;
+    expect(zeros.length).toBeGreaterThanOrEqual(128 * 32 * 4);
+    expect(zeros.every((b) => b === 0)).toBe(true);
+    // ... then the bitmap itself.
+    expect((calls.at(-1) as Call).length).toBe(7);
+  });
+
+  it('clears the strip to the right of a narrower bitmap too, and never a fresh cell', () => {
+    resident = want(9);
+    land(9, 128, 128);
+    land(1, 128, 128);
+    um.forget(1);
+    um.afterRender();
+    um.afterRender();
+    calls.length = 0;
+    land(2, 96, 128);
+    const clear = calls.slice(0, -1) as Call[];
+    const cell = (calls.at(-1) as Call).slice(2, 4) as [number, number];
+    expect(clear).toHaveLength(1);
+    expect(clear[0].slice(2, 6)).toEqual([cell[0] + 96, cell[1], 32, 128]);
+    // A cell nobody used before is already empty: just the bitmap.
+    calls.length = 0;
+    land(3, 100, 70);
+    expect(calls).toHaveLength(1);
+  });
+});

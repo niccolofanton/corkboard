@@ -69,6 +69,12 @@ export class OverlayLayer {
     this.invalidate();
   }
 
+  // The renderer's pixel ratio changed.
+  setDpr(dpr: number): void {
+    this.guides.setDpr(dpr);
+    this.invalidate();
+  }
+
   setSelection(s: SelectionVisual | null): void {
     this.selection = s;
     this.invalidate();

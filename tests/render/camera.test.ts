@@ -111,6 +111,68 @@ describe('CameraController', () => {
     expect(cam.cam.ty).toBeCloseTo(-300, 3);
   });
 
+  describe('a zoom clamped by the range', () => {
+    // A camera that puts world point (100, 50) at the viewport centre, at a scale past the maximum.
+    const centred = (scale: number) => ({
+      scale,
+      tx: 1280 / 2 - 100 * scale,
+      ty: 800 / 2 - 50 * scale,
+    });
+    const centreOf = (cam: CameraController) => ({
+      x: (1280 / 2 - cam.cam.tx) / cam.cam.scale,
+      y: (800 / 2 - cam.cam.ty) / cam.cam.scale,
+    });
+
+    it('jumpTo keeps the world point at the viewport centre there', () => {
+      const { cam } = make();
+      cam.jumpTo(centred(10));
+      expect(cam.cam.scale).toBe(MAX_SCALE);
+      expect(centreOf(cam).x).toBeCloseTo(100, 6);
+      expect(centreOf(cam).y).toBeCloseTo(50, 6);
+    });
+
+    it('flyTo lands with the world point at the viewport centre', () => {
+      const { cam } = make();
+      cam.flyTo(centred(10), 300);
+      drain(cam);
+      expect(cam.cam.scale).toBeCloseTo(MAX_SCALE, 6);
+      expect(centreOf(cam).x).toBeCloseTo(100, 4);
+      expect(centreOf(cam).y).toBeCloseTo(50, 4);
+    });
+
+    it('does the same below the minimum, and leaves an in-range camera alone', () => {
+      const { cam } = make();
+      cam.jumpTo(centred(0.001));
+      expect(cam.cam.scale).toBe(MIN_SCALE);
+      expect(centreOf(cam).x).toBeCloseTo(100, 6);
+      const ok = { tx: -40, ty: 25, scale: 1.5 };
+      cam.jumpTo(ok);
+      expect(cam.cam).toEqual(ok);
+    });
+  });
+
+  describe('a fit with nothing to fit', () => {
+    it('leaves the camera where it is (a null target), animated or not', () => {
+      const { cam, wakes } = make();
+      cam.jumpTo({ tx: 12, ty: 34, scale: 2 });
+      const before = { ...cam.cam };
+      const w = wakes();
+      cam.requestFit(() => null, 48, false);
+      cam.requestFit(() => null, 48, true);
+      expect(cam.cam).toEqual(before);
+      expect(cam.busy).toBe(false);
+      expect(wakes()).toBe(w);
+    });
+
+    it('also when it was asked for while the host had no size', () => {
+      const cam = new CameraController(() => {});
+      cam.setViewport(1, 1, true);
+      cam.requestFit(() => null, 0);
+      cam.setViewport(800, 600);
+      expect(cam.cam).toEqual({ tx: 0, ty: 0, scale: 1 });
+    });
+  });
+
   describe('a fit asked for while the host has no size', () => {
     const world = { x0: 0, y0: 0, x1: 1000, y1: 500 };
     const empty = () => {

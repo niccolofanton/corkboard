@@ -91,10 +91,11 @@ export class GuideLayer {
   // Pill rects placed this frame (screen px: x, y, w, h), to keep two labels from overlapping.
   private readonly placed: number[] = [];
 
-  constructor(
-    theme: Theme,
-    private readonly dpr = 1,
-  ) {
+  // The renderer's pixel ratio (a hairline is one device pixel wide).
+  private dpr: number;
+
+  constructor(theme: Theme, dpr = 1) {
+    this.dpr = dpr;
     this.container.eventMode = 'none';
     this.lines.eventMode = 'none';
     this.pillBg.eventMode = 'none';
@@ -106,6 +107,13 @@ export class GuideLayer {
       fontWeight: '600',
       fill: theme.onGuide ?? 0xffffff,
     });
+  }
+
+  // The pixel ratio changed (browser zoom, another screen): redraw on the new device pixel grid.
+  setDpr(dpr: number): void {
+    if (dpr === this.dpr) return;
+    this.dpr = dpr;
+    this.dirty = true;
   }
 
   setTheme(theme: Theme): void {
