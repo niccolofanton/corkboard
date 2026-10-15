@@ -240,6 +240,38 @@ function foldable(button: HTMLElement, body: HTMLElement, key: string, openByDef
   };
 }
 
+// What people paste is often a bare address ("youtube.com/watch?v=…"): give it https://. Anything that is
+// still not an http(s) URL with a dotted host is not a link, and would only make an "invalid URL" card.
+function toLink(text: string): string | null {
+  const raw = text.trim();
+  if (raw === '' || /\s/.test(raw)) return null;
+  try {
+    // A scheme is letters and a colon, but "example.com:8080" is a host and a port.
+    const url = new URL(/^[a-z][a-z\d+.-]*:(?!\d)/i.test(raw) ? raw : `https://${raw}`);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    if (url.hostname !== 'localhost' && !url.hostname.includes('.')) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+// The board zooms on a pinch (a wheel event with ctrlKey) only over the canvas. Over the floating panels the
+// browser would zoom the whole page, chrome included, so that default is turned off there.
+function keepPageZoom(host: HTMLElement): void {
+  document.addEventListener(
+    'wheel',
+    (e) => {
+      if (e.ctrlKey && !host.contains(e.target as Node)) e.preventDefault();
+    },
+    { passive: false },
+  );
+  // Safari pinches with its own gesture events.
+  document.addEventListener('gesturestart', (e) => {
+    if (!host.contains(e.target as Node)) e.preventDefault();
+  });
+}
+
 // A segmented control is a radio group: `apply` gets the value of whichever radio was just checked.
 function onRadio<T extends string>(name: string, apply: (value: T) => void): void {
   for (const input of document.querySelectorAll<HTMLInputElement>(`input[name="${name}"]`)) {
@@ -283,6 +315,7 @@ function startStats(board: Corkboard): void {
 
 async function main(): Promise<void> {
   const closePopovers = initPopovers();
+  keepPageZoom($('board'));
   foldable($('stats-toggle'), $('hud'), 'stats', !window.matchMedia(NARROW).matches);
   foldable($('help-toggle'), $('help'), 'help', window.innerWidth >= 1200);
   // The close button only shows while the card is open, so a click on the toggle is a close.
@@ -317,8 +350,11 @@ async function main(): Promise<void> {
   $('fit').onclick = () => board.camera.fit();
   const addEmbed = (): void => {
     const input = $<HTMLInputElement>('embed-url');
-    const url = input.value.trim();
-    if (url === '') return;
+    const url = toLink(input.value);
+    if (url === null) {
+      if (input.value.trim() !== '') toast('That is not a link. Paste a web address, like youtube.com/watch?v=…');
+      return;
+    }
     const [id] = board.add({ media: { embed: { url } } });
     input.value = '';
     board.select([id]);
