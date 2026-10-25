@@ -237,6 +237,12 @@ input {
 .btn.block {
   width: 100%;
 }
+.btn.block + .btn.block {
+  margin-top: 8px;
+}
+.segmented + .row {
+  margin-top: 8px;
+}
 @media (hover: hover) {
   .btn.primary:hover {
     background: color-mix(in srgb, var(--primary) 90%, transparent);

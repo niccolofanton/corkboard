@@ -5,8 +5,15 @@ import {
   type EmbedResolution,
   type VideoMode,
 } from 'corkboard';
+import { makeWindows, placeWindows } from './windows';
 
 const COUNT = 600;
+// `?windows=1000`: a board of that many different, autoplaying embeds (capped) instead of the picture cards.
+const WINDOWS = (() => {
+  const n = Number(new URLSearchParams(location.search).get('windows'));
+  return Number.isInteger(n) && n > 0 ? Math.min(n, 5000) : 0;
+})();
+const WINDOWS_BUTTON = 1000;
 // height / width of the pictures: a mix of portrait, square and landscape cards.
 const ASPECTS = [1.5, 1.25, 1, 0.75, 1.33, 0.66, 1.78, 1.1];
 // Public sample clips (served with CORS). Video cards play in a <video> laid over the poster.
@@ -150,6 +157,17 @@ function placeEmbeds(board: Corkboard): void {
     }
     y += rowHeight(r) + gap;
   }
+}
+
+// Windows added so far, so the label numbers and the seed of the next batch differ.
+let windowsAdded = 0;
+
+// Embed cards, each its own seeded little page, in a masonry below `y0`. Returns the new ids.
+function addWindows(board: Corkboard, n: number, x0: number, y0: number): string[] {
+  const seed = 1000 + windowsAdded;
+  const inits = makeWindows(n, rng(seed), windowsAdded);
+  windowsAdded += n;
+  return board.add(placeWindows(inits, x0, y0, rng(seed + 1)));
 }
 
 // A wide block reads better than a tall one: columns for roughly a 16:10 grid.
@@ -302,15 +320,42 @@ function startStats(board: Corkboard): void {
     stat('textures', `${Math.round((s.textureBytes as number) / 1048576)} MB`);
     stat('lod', lv.join('/'));
     stat('playing', String(board.playing.size));
+    const max = board.embeds.maxLive;
     stat(
       'embeds',
-      `${board.embeds.live.size}/${board.embeds.maxLive}${board.embeds.interacting ? ' · interacting' : ''}`,
+      `${board.embeds.live.size}/${Number.isFinite(max) ? max : '∞'}${board.embeds.interacting ? ' · interacting' : ''}`,
     );
+    stat('parked', String(board.embeds.parked.size));
+    stat('culled', String(board.embeds.culled.size));
+    stat('frozen', String(board.embeds.frozen.size));
+    const budget = board.embeds.animatingBudget;
+    stat('animating', `${board.embeds.animating.size}/${Number.isFinite(budget) ? budget : '∞'}`);
+    stat('loading', String(board.embeds.loading.size));
     stat('selected', String(board.selection.length));
     const state = perSec > 0 ? 'rendering' : 'idle';
     $('stats-state').dataset.state = state;
     $('stats-state-label').textContent = state;
   }, 500);
+}
+
+const NO_CAP = {
+  maxLive: Number.POSITIVE_INFINITY,
+  maxLiveTouch: Number.POSITIVE_INFINITY,
+  maxMounted: Number.POSITIVE_INFINITY,
+  maxMountedTouch: Number.POSITIVE_INFINITY,
+};
+// What the windows mode turns on: any card in view goes live, with no cap, and videos play on their own.
+const WINDOWS_OPTIONS = { ...NO_CAP, minLivePx: 0, minLiveScale: 0, autoplay: true };
+
+// Makes the settings panel say what WINDOWS_OPTIONS did.
+function showWindowsSettings(): void {
+  const pick = (name: string, value: string): void => {
+    const input = document.querySelector<HTMLInputElement>(`input[name="${name}"][value="${value}"]`);
+    if (input) input.checked = true;
+  };
+  pick('golive', 'view');
+  pick('maxlive', 'all');
+  $<HTMLInputElement>('autoplay').checked = true;
 }
 
 async function main(): Promise<void> {
@@ -327,12 +372,18 @@ async function main(): Promise<void> {
     // where a card is about 30 px: let the clips play from there (still at most 8 at once).
     video: { mode: 'always', minPlayPx: 24 },
     snapping: { guides: true, grid: false },
-    embeds: { resolve: resolveEmbed },
+    // The windows board starts with everything on: every card in view live, no cap, autoplay.
+    embeds: WINDOWS > 0 ? { resolve: resolveEmbed, ...WINDOWS_OPTIONS } : { resolve: resolveEmbed },
   });
   (window as unknown as { board: Corkboard }).board = board;
 
-  board.add(makeCards(COUNT));
-  board.layout.tidy(undefined, { columns: columnsFor(COUNT), animate: false });
+  if (WINDOWS > 0) {
+    addWindows(board, WINDOWS, 0, 0);
+    showWindowsSettings();
+  } else {
+    board.add(makeCards(COUNT));
+    board.layout.tidy(undefined, { columns: columnsFor(COUNT), animate: false });
+  }
   placeEmbeds(board);
   board.camera.fit(undefined, { animate: false });
 
@@ -374,6 +425,15 @@ async function main(): Promise<void> {
     toast('100 cards added next to what is on screen.');
     closePopovers();
   };
+  $('add-windows').onclick = () => {
+    const b = board.bounds();
+    const ids = addWindows(board, WINDOWS_BUTTON, b.x0, b.y1 + 200);
+    board.setEmbeds(WINDOWS_OPTIONS);
+    showWindowsSettings();
+    board.camera.fit(ids, { padding: 80 });
+    toast(`${WINDOWS_BUTTON} windows added, autoplay on, no live cap. Zoom out slowly if it feels heavy.`);
+    closePopovers();
+  };
   $<HTMLInputElement>('guides').onchange = (e) =>
     board.setSnapping({ guides: (e.target as HTMLInputElement).checked });
   $<HTMLInputElement>('gridsnap').onchange = (e) =>
@@ -382,6 +442,32 @@ async function main(): Promise<void> {
     board.setGrid((e.target as HTMLInputElement).checked);
   onRadio<VideoMode>('video', (mode) => board.setVideo({ mode }));
   onRadio<Exclude<EmbedResolution, number>>('resolution', (resolution) => board.setEmbeds({ resolution }));
+  // In view: any card on screen (the default). Large: the old 320 x 200 px at zoom >= 0.25. Selected: only
+  // the selected card. Parked frames (live once, now small) are not affected.
+  onRadio<'view' | 'large' | 'selected'>('golive', (v) =>
+    board.setEmbeds(
+      v === 'view'
+        ? { minLivePx: 0, minLiveScale: 0 }
+        : v === 'large'
+          ? { minLivePx: 320, minLiveScale: 0.25 }
+          : { minLivePx: Number.POSITIVE_INFINITY, minLiveScale: 0 },
+    ),
+  );
+  // Touch gets a quarter of it; parked frames may double it. All: no cap, touch included.
+  onRadio<string>('maxlive', (v) => {
+    if (v === 'all') {
+      board.setEmbeds(NO_CAP);
+      return;
+    }
+    const n = Number(v);
+    const touch = Math.max(1, Math.round(n / 4));
+    board.setEmbeds({ maxLive: n, maxLiveTouch: touch, maxMounted: n * 2, maxMountedTouch: touch * 2 });
+  });
+  $<HTMLInputElement>('autoplay').onchange = (e) =>
+    board.setEmbeds({ autoplay: (e.target as HTMLInputElement).checked });
+  // Lowers how many frames animate while the page is slow, and raises it back when it is smooth.
+  $<HTMLInputElement>('adaptive').onchange = (e) =>
+    board.setEmbeds({ adaptive: (e.target as HTMLInputElement).checked });
   // The body background follows the `--bg` token, which is the canvas colour of each theme.
   let dark = true;
   $('theme').onclick = () => {

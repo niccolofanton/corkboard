@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Corkboard — embed bug repro</title>
+    <meta name="color-scheme" content="dark light" />
+    <style>
+      html, body { height: 100%; margin: 0; overflow: hidden; background: #15171c; }
+      #board { position: fixed; inset: 0; }
+      #hud {
+        position: fixed; top: 12px; left: 12px; z-index: 10; width: 300px; box-sizing: border-box;
+        padding: 12px 14px; border-radius: 12px;
+        font: 13px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif;
+        color: #f2f3f5; background: rgba(24, 26, 32, 0.92); border: 1px solid rgba(255, 255, 255, 0.35);
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.45); backdrop-filter: blur(8px);
+        user-select: none;
+      }
+      #hud h1 { margin: 0 0 2px; font-size: 12px; font-weight: 600; opacity: 0.75; text-transform: uppercase; letter-spacing: 0.06em; }
+      #label { font-size: 34px; font-weight: 800; line-height: 1.1; margin-bottom: 8px; color: #ffd54a; word-break: break-word; }
+      #stats { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0 0 10px; font-variant-numeric: tabular-nums; }
+      #stats dt { opacity: 0.75; }
+      #stats dd { margin: 0; font: 600 13px ui-monospace, Menlo, monospace; }
+      #btns { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+      #hud button {
+        font: inherit; font-weight: 600; color: #f2f3f5; background: #343946; border: 1px solid #5b6275;
+        border-radius: 8px; padding: 5px 10px; cursor: pointer;
+      }
+      #hud button:hover { background: #434a5b; }
+      #hud button[aria-pressed='true'] { background: #c0392b; border-color: #ff8a7d; }
+      #hud ul { margin: 0; padding-left: 16px; font-size: 12px; opacity: 0.85; }
+      #hud li + li { margin-top: 3px; }
+      #log { margin: 8px 0 0; padding: 6px 8px; min-height: 3.6em; border-radius: 6px; background: rgba(0, 0, 0, 0.35);
+        font: 11px/1.35 ui-monospace, Menlo, monospace; white-space: pre; overflow: hidden; }
+      @media (prefers-color-scheme: light) {
+        #hud { color: #14161c; background: rgba(255, 255, 255, 0.94); border-color: rgba(0, 0, 0, 0.4); }
+        #label { color: #b3261e; }
+        #hud button { color: #14161c; background: #e6e8ee; border-color: #9aa1b3; }
+        #hud button:hover { background: #d5d9e3; }
+        #hud button[aria-pressed='true'] { color: #fff; background: #c0392b; }
+        #log { background: rgba(0, 0, 0, 0.07); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="board"></div>
+    <aside id="hud">
+      <h1>Corkboard embed bugs</h1>
+      <div id="label">Embed test</div>
+      <dl id="stats">
+        <dt>Iframes mounted</dt><dd id="s-live">0</dd>
+        <dt>Iframes parked</dt><dd id="s-parked">n/a</dd>
+        <dt>Iframes loading</dt><dd id="s-loading">n/a</dd>
+        <dt>Iframes culled</dt><dd id="s-culled">n/a</dd>
+        <dt>Iframes frozen</dt><dd id="s-frozen">n/a</dd>
+        <dt>Animating</dt><dd id="s-animating">n/a</dd>
+        <dt>Destroyed so far</dt><dd id="s-destroyed">0</dd>
+        <dt>Zoom</dt><dd id="s-zoom">100%</dd>
+      </dl>
+      <div id="btns">
+        <button id="g1">Group 1</button>
+        <button id="g2">Group 2</button>
+        <button id="z100">Zoom 100%</button>
+        <button id="z200">Zoom to ~200 px cards</button>
+        <button id="z02">Zoom 0.2</button>
+        <button id="posters" aria-pressed="false">Posters only</button>
+      </div>
+      <ul>
+        <li><b>Bug 1 (group 1):</b> hit "Posters only" or zoom out. Each poster must keep its own proportions (circles stay round); a squashed or stretched one is the bug.</li>
+        <li><b>Bug 2 (group 2):</b> at "Group 2" the clocks run live. Shrink a card to ~200 px, pan it half off screen, or go under 0.25: the live iframe must not be swapped for the grey "POSTER" card too early.</li>
+        <li>Open two tabs with <code>?label=Before</code> and <code>?label=After</code> to compare.</li>
+      </ul>
+      <pre id="log"></pre>
+    </aside>
+    <script type="module" src="./embeds.ts"></script>
+  </body>
+</html>

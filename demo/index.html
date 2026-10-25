@@ -209,6 +209,14 @@
           </svg>
           Add 100 cards
         </button>
+        <button id="add-windows" class="btn outline block" type="button">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <path d="M3 9h18" />
+          </svg>
+          Add 1000 windows
+        </button>
+        <p class="note">Autoplaying embeds, all live at once. Heavy: it may slow the page down.</p>
       </div>
 
       <div id="settings-popover" class="panel popover" role="dialog" aria-label="Settings" hidden>
@@ -237,6 +245,27 @@
           <label><input type="radio" name="resolution" value="1080p" /><span>1080p</span></label>
           <label><input type="radio" name="resolution" value="native" /><span>Native</span></label>
         </div>
+        <p class="label">Embeds go live</p>
+        <div class="segmented" role="radiogroup" aria-label="When embeds go live">
+          <label><input type="radio" name="golive" value="view" checked /><span>In view</span></label>
+          <label><input type="radio" name="golive" value="large" /><span>Large</span></label>
+          <label><input type="radio" name="golive" value="selected" /><span>Selected</span></label>
+        </div>
+        <p class="label">Max live embeds</p>
+        <div class="segmented" role="radiogroup" aria-label="Max live embeds">
+          <label><input type="radio" name="maxlive" value="4" /><span>4</span></label>
+          <label><input type="radio" name="maxlive" value="12" checked /><span>12</span></label>
+          <label><input type="radio" name="maxlive" value="24" /><span>24</span></label>
+          <label><input type="radio" name="maxlive" value="all" /><span>All</span></label>
+        </div>
+        <label class="row">
+          <span>Autoplay embeds</span>
+          <input id="autoplay" class="switch" type="checkbox" role="switch" />
+        </label>
+        <label class="row">
+          <span>Adaptive animation</span>
+          <input id="adaptive" class="switch" type="checkbox" role="switch" checked />
+        </label>
       </div>
     </div>
 
@@ -272,6 +301,16 @@
         <dd id="stat-playing"></dd>
         <dt>Embeds live</dt>
         <dd id="stat-embeds"></dd>
+        <dt>Parked</dt>
+        <dd id="stat-parked"></dd>
+        <dt>Culled</dt>
+        <dd id="stat-culled"></dd>
+        <dt>Frozen</dt>
+        <dd id="stat-frozen"></dd>
+        <dt>Animating</dt>
+        <dd id="stat-animating"></dd>
+        <dt>Loading</dt>
+        <dd id="stat-loading"></dd>
         <dt>Selected</dt>
         <dd id="stat-selected"></dd>
       </dl>
