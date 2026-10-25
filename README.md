@@ -49,7 +49,7 @@ await Corkboard.create(el, { textures: { workerUrl } });
 - Selection: `selection`, `select(ids)`, `selectAll()`, `clearSelection()`.
 - `board.layout`: `tidy(ids?, opts)`, `masonry(ids?, opts)`, `align(mode, ids?)`, `distribute(axis, ids?)`, `equalWidth(ids?)`.
 - `board.camera`: `get()`, `set(cam)`, `fit(ids?)`, `zoomTo(rect)`, `zoomBy(k)`, `actual()`, `center(x, y, scale?)`, `visible()`, `screenToWorld`, `worldToScreen`.
-- Settings: `setTheme`, `setGrid`, `setSnapping({ guides, grid })`, `setVideo({ mode: 'always' | 'hover' | 'off', loop, muted, minPlayPx, maxPlaying, maxPlayingTouch })`, `setVideoPaused`, `setEmbeds({ maxLive, maxLiveTouch, minLivePx, resolution, arbitrarySameOrigin })`.
+- Settings: `setTheme`, `setGrid`, `setSnapping({ guides, grid })`, `setVideo({ mode: 'always' | 'hover' | 'off', loop, muted, minPlayPx, maxPlaying, maxPlayingTouch })`, `setVideoPaused`, `setEmbeds({ maxLive, maxLiveTouch, maxOffscreen, minLivePx, freezePx, maxAnimating, adaptive, resolution, arbitrarySameOrigin, autoplay })`.
 - Events (`board.on(type, fn)` returns an unsubscribe): `selection`, `hover`, `click`, `dblclick`, `transform`, `gesture`, `delete`, `change`, `camera`, `cameraSettled`, `embedInteract`, `embedLive`, `embedResolved`.
 - `stats()`, `dispose()`. The pure layout and snapping functions, `Store`, `Stage` and `Interaction` are exported too.
 
@@ -90,6 +90,23 @@ board.add({ media: { embed: { html: '<button onclick="this.textContent=1">0</but
 - Live iframe: only for a card at least 320 x 200 px on screen (`minLivePx`) or selected, zoom >= 25 %, camera still, at most
   `maxLive` at once (4, or 1 on touch). It is laid out at world size and moved with the camera as one CSS matrix; leaving the
   live state destroys it (LRU by last selection).
+- Culling: a mounted iframe whose card leaves the view (plus a 25 % margin) is hidden at once (`display: none`, so it stops
+  rendering but keeps its state) and shows again the moment the card returns. At most `maxOffscreen` hidden frames are kept
+  (24, or 6 on touch), the most recently seen first; the rest are destroyed when the camera settles.
+- Freezing: a mounted frame whose card gets smaller than `freezePx` on screen (default 140 CSS px, short side; 0 turns it
+  off) and is not selected or in interact mode stops costing anything. A snippet is asked (by a small script injected ahead
+  of its HTML) for a snapshot of its own document, current animation state included; that image becomes the card's poster
+  and the frame is hidden (`display: none`, alive, so it resumes where it was). A YouTube or Vimeo player is paused through
+  its postMessage API (it keeps showing the current video frame) and played again afterwards. Both come back above 1.4x
+  `freezePx`, when selected, or on interact. Parked and culled snippets are paused (animations and `requestAnimationFrame`),
+  parked and culled videos too. A snapshot that fails (a tainted canvas, Safari) leaves the frame live. `board.embeds.frozen`.
+- Animating budget: of the mounted frames that are on screen, not parked, culled or frozen, the ones that can be paused
+  (snippets, YouTube / Vimeo players that may be playing) are ranked (interacting, selected, biggest on screen, nearest the
+  centre) and only the first N animate; the rest are paused and keep showing their last frame. Mounting is not affected.
+  `maxAnimating` is the ceiling (default `Infinity`); with `adaptive` (default `true`) a rAF sampler, running only while
+  something visible renders in a visible tab, lowers N to 70% of what animates (min 6) after a second under 40 fps and
+  raises it by a quarter + 2 after two seconds in a row over 55 fps, up to the ceiling. Pages that cannot be paused (plain
+  URLs, Spotify, CodePen, Figma) take no slot. `board.embeds.animating`, `board.embeds.animatingBudget`.
 - Resolution: a live page is laid out at a virtual screen with the card's aspect, then scaled onto the card, so it shows
   its desktop layout at any card size. `embeds.resolution` is `'720p'` (default: short side 720 CSS px, a 16:9 card is a
   1280 x 720 page), `'1080p'` (1920 x 1080), a number (the short side) or `'native'` (the card's world size: a 400 px card

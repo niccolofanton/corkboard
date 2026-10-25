@@ -2,6 +2,7 @@
 // holds and the host that serves the iframe, and is never stored in the board: a tampered or shared board
 // cannot escalate it.
 import type { EmbedSource } from '../types';
+import { SNIPPET_BOOTSTRAP } from './bootstrap';
 import { normalizeEmbedUrl, providerOfIframeSrc, type EmbedProvider } from './providers';
 
 export type SandboxProfile = 'provider' | 'arbitrary' | 'snippet';
@@ -59,10 +60,12 @@ export interface IframeSpec {
 
 // `<!doctype html>` and the CSP `<meta>` come first so nothing in the snippet is parsed before the policy.
 // A snippet cannot loosen it (several policies only intersect), nor can it unset the sandbox.
+// Then the bootstrap (bootstrap.ts: pause / resume / snapshot for the layer), which runs before the snippet's
+// own scripts so it can gate requestAnimationFrame. The CSP already allows inline scripts, so it is unchanged.
 export function snippetDocument(html: string): string {
   return (
     `<!doctype html><meta http-equiv="Content-Security-Policy" content="${SNIPPET_CSP}">` +
-    `<meta charset="utf-8">${html}`
+    `<meta charset="utf-8"><script>${SNIPPET_BOOTSTRAP}</script>${html}`
   );
 }
 

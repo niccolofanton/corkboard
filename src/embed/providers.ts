@@ -249,4 +249,50 @@ export function providerOfIframeSrc(src: string): EmbedProvider {
   }
 }
 
+// The iframe URL of a video provider, set to start playing on its own and muted (browsers only let a muted
+// page autoplay), inline on iOS and looping. YouTube needs `playlist=<id>` to loop a single video; a
+// `list` the URL already carries is kept instead. Vimeo keeps its unlisted-video `h` hash. Any other
+// provider (or a URL that does not parse) comes back as is. Pure; the stored embed info is never touched.
+export function withAutoplay(provider: EmbedProvider, src: string): string {
+  if (provider !== 'youtube' && provider !== 'vimeo') return src;
+  let u: URL;
+  try {
+    u = new URL(src);
+  } catch {
+    return src;
+  }
+  const q = u.searchParams;
+  if (provider === 'vimeo') {
+    q.set('autoplay', '1');
+    q.set('muted', '1');
+    q.set('loop', '1');
+  } else {
+    const word = u.pathname.split('/')[2] ?? '';
+    q.set('autoplay', '1');
+    q.set('mute', '1');
+    q.set('playsinline', '1');
+    // A live stream has nothing to loop.
+    if (word !== 'live_stream') q.set('loop', '1');
+    if (word !== 'videoseries' && word !== 'live_stream' && !q.has('list')) q.set('playlist', word);
+  }
+  return u.toString();
+}
+
+// A YouTube iframe URL with its postMessage API on (`enablejsapi=1`, plus `origin` when the page's is an
+// http(s) one: the player ignores commands from a page it cannot match). The layer pauses and resumes the
+// player with it. Vimeo's player takes its commands without a flag; any other provider (or a URL that does
+// not parse) comes back as is. Pure; the stored embed info is never touched.
+export function withJsApi(provider: EmbedProvider, src: string, origin?: string): string {
+  if (provider !== 'youtube') return src;
+  let u: URL;
+  try {
+    u = new URL(src);
+  } catch {
+    return src;
+  }
+  u.searchParams.set('enablejsapi', '1');
+  if (origin !== undefined && /^https?:\/\//.test(origin)) u.searchParams.set('origin', origin);
+  return u.toString();
+}
+
 export const isAllowlisted = (p: EmbedProvider): boolean => p !== 'generic';

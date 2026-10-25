@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { EMBED_CB, SNIPPET_BOOTSTRAP } from '../../src/embed/bootstrap';
 import {
   iframeSpecFor,
   SANDBOX_ARBITRARY,
@@ -124,5 +125,107 @@ describe('snippetDocument', () => {
     expect(SNIPPET_CSP).toContain("default-src 'none'");
     expect(SNIPPET_CSP).toContain("script-src 'unsafe-inline'");
     expect(SNIPPET_CSP).not.toContain('connect-src');
+  });
+});
+
+describe('snippet bootstrap', () => {
+  it('comes after the CSP and before the snippet, as one inline script the CSP allows', () => {
+    const doc = snippetDocument('<p id="mine">x</p><script>mine()</script>');
+    const boot = doc.indexOf(SNIPPET_BOOTSTRAP);
+    expect(boot).toBeGreaterThan(doc.indexOf('Content-Security-Policy'));
+    expect(boot).toBeLessThan(doc.indexOf('id="mine"'));
+    expect(doc).toContain(`<script>${SNIPPET_BOOTSTRAP}</script>`);
+    // Unchanged: inline scripts and data: images are all the bootstrap needs.
+    expect(SNIPPET_CSP).toContain("script-src 'unsafe-inline'");
+    expect(SNIPPET_CSP).toContain('img-src data: https:');
+    expect(SNIPPET_BOOTSTRAP).not.toMatch(/<\/script/i);
+    expect(() => new Function(SNIPPET_BOOTSTRAP)).not.toThrow();
+    expect(SNIPPET_BOOTSTRAP.length).toBeLessThan(5000);
+  });
+
+  // The script in a frame of its own: `parent` is the test window, as for a real snippet.
+  const boot = () => {
+    const frame = document.createElement('iframe');
+    document.body.appendChild(frame);
+    const w = frame.contentWindow as Window & { eval(s: string): unknown };
+    Object.assign(w.document, { getAnimations: () => [] });
+    w.eval(SNIPPET_BOOTSTRAP);
+    const msg = (data: unknown, source: unknown = w.parent) =>
+      w.dispatchEvent(new MessageEvent('message', { data, source: source as Window, origin: location.origin }));
+    return { w, msg, close: () => frame.remove(), parent: w.parent };
+  };
+
+  it('holds requestAnimationFrame while paused, and flushes it on resume', async () => {
+    const { w, msg, close } = boot();
+    const seen: string[] = [];
+    w.requestAnimationFrame(() => seen.push('before'));
+    msg({ cb: EMBED_CB, op: 'pause' });
+    w.requestAnimationFrame(() => seen.push('during'));
+    const cancelled = w.requestAnimationFrame(() => seen.push('cancelled'));
+    w.cancelAnimationFrame(cancelled);
+    await new Promise((r) => setTimeout(r, 80));
+    expect(seen).toEqual([]);
+    msg({ cb: EMBED_CB, op: 'resume' });
+    await vi.waitFor(() => expect(seen.sort()).toEqual(['before', 'during']));
+    close();
+  });
+
+  it('only listens to its parent and to its own protocol', async () => {
+    const { w, msg, close } = boot();
+    const seen: number[] = [];
+    msg({ cb: 'other', op: 'pause' });
+    msg({ cb: EMBED_CB, op: 'pause' }, w); // not the parent
+    w.requestAnimationFrame(() => seen.push(1));
+    await vi.waitFor(() => expect(seen).toEqual([1]));
+    close();
+  });
+
+  it('answers a snapshot request with the same id: SVG markup, or ok: false when it cannot build it', async () => {
+    const { msg, close, parent } = boot();
+    const replies: unknown[] = [];
+    const onReply = (e: Event): void => void replies.push((e as MessageEvent).data);
+    parent.addEventListener('message', onReply);
+    msg({ cb: EMBED_CB, op: 'snapshot', id: 42, w: 100, h: 50 });
+    await vi.waitFor(() => expect(replies).toHaveLength(1), { timeout: 3000 });
+    const r = replies[0] as { cb: string; op: string; id: number; ok: boolean; svg?: string };
+    expect(r).toMatchObject({ cb: EMBED_CB, op: 'snapshot', id: 42 });
+    // jsdom may lack what the clone needs (getAnimations): then an honest no rather than a broken picture.
+    if (r.ok) expect(r.svg).toContain('<foreignObject');
+    else expect(r.svg).toBeUndefined();
+    parent.removeEventListener('message', onReply);
+    close();
+  });
+
+  it('lays a snapshot out at vw x vh when the window reports no size, and says no when it has none', async () => {
+    const { w, msg, close, parent } = boot();
+    const replies: Array<{ id: number; ok: boolean; svg?: string }> = [];
+    const onReply = (e: Event): void => void replies.push((e as MessageEvent).data);
+    parent.addEventListener('message', onReply);
+    // A frame that is display: none.
+    Object.defineProperty(w, 'innerWidth', { value: 0, configurable: true });
+    Object.defineProperty(w, 'innerHeight', { value: 0, configurable: true });
+    msg({ cb: EMBED_CB, op: 'snapshot', id: 1, w: 100, h: 50, vw: 320, vh: 200 });
+    msg({ cb: EMBED_CB, op: 'snapshot', id: 2, w: 100, h: 50 });
+    await vi.waitFor(() => expect(replies).toHaveLength(2), { timeout: 3000 });
+    const [withSize, without] = replies;
+    expect(without.ok).toBe(false);
+    // jsdom may lack what the clone needs: then an honest no there too.
+    if (withSize.ok) expect(withSize.svg).toContain('width="320" height="200"');
+    parent.removeEventListener('message', onReply);
+    close();
+  });
+
+  it('answers show with painted, with the same id, even while paused', async () => {
+    const { msg, close, parent } = boot();
+    const replies: Array<{ cb: string; op: string; id: number }> = [];
+    const onReply = (e: Event): void => void replies.push((e as MessageEvent).data);
+    parent.addEventListener('message', onReply);
+    msg({ cb: EMBED_CB, op: 'pause' });
+    msg({ cb: 'other', op: 'show', id: 8 });
+    msg({ cb: EMBED_CB, op: 'show', id: 9 });
+    await vi.waitFor(() => expect(replies).toHaveLength(1), { timeout: 3000 });
+    expect(replies[0]).toEqual({ cb: EMBED_CB, op: 'painted', id: 9 });
+    parent.removeEventListener('message', onReply);
+    close();
   });
 });

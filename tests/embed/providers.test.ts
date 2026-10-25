@@ -5,6 +5,8 @@ import {
   parseEmbedUrl,
   parseTimestamp,
   providerOfIframeSrc,
+  withAutoplay,
+  withJsApi,
 } from '../../src/embed/providers';
 
 describe('normalizeEmbedUrl', () => {
@@ -281,5 +283,84 @@ describe('providerOfIframeSrc', () => {
   it('allowlists every provider but generic', () => {
     expect(isAllowlisted('youtube')).toBe(true);
     expect(isAllowlisted('generic')).toBe(false);
+  });
+});
+
+describe('withAutoplay', () => {
+  const q = (src: string) => new URL(src).searchParams;
+
+  it('starts a YouTube video muted, inline and looping (loop needs playlist=<id>)', () => {
+    const src = withAutoplay('youtube', 'https://www.youtube-nocookie.com/embed/aqz-KE-bpKQ');
+    const u = new URL(src);
+    expect(u.origin + u.pathname).toBe('https://www.youtube-nocookie.com/embed/aqz-KE-bpKQ');
+    expect(Object.fromEntries(u.searchParams)).toEqual({
+      autoplay: '1',
+      mute: '1',
+      playsinline: '1',
+      loop: '1',
+      playlist: 'aqz-KE-bpKQ',
+    });
+  });
+
+  it('keeps a start time, and a list the URL already has instead of playlist=<id>', () => {
+    const withStart = q(withAutoplay('youtube', 'https://www.youtube-nocookie.com/embed/aqz-KE-bpKQ?start=90'));
+    expect(withStart.get('start')).toBe('90');
+    expect(withStart.get('playlist')).toBe('aqz-KE-bpKQ');
+    const withList = q(withAutoplay('youtube', 'https://www.youtube-nocookie.com/embed/aqz-KE-bpKQ?list=PLabc'));
+    expect(withList.get('list')).toBe('PLabc');
+    expect(withList.has('playlist')).toBe(false);
+    expect(withList.get('autoplay')).toBe('1');
+  });
+
+  it('does not loop a live stream and needs no playlist for a playlist embed', () => {
+    const live = q(withAutoplay('youtube', 'https://www.youtube-nocookie.com/embed/live_stream?channel=UCx'));
+    expect(live.get('autoplay')).toBe('1');
+    expect(live.has('loop')).toBe(false);
+    expect(live.has('playlist')).toBe(false);
+    const series = q(withAutoplay('youtube', 'https://www.youtube-nocookie.com/embed/videoseries?list=PLabc'));
+    expect(series.get('loop')).toBe('1');
+    expect(series.has('playlist')).toBe(false);
+  });
+
+  it('starts a Vimeo video muted and looping, keeping the unlisted hash', () => {
+    const plain = withAutoplay('vimeo', 'https://player.vimeo.com/video/76979871');
+    expect(new URL(plain).origin + new URL(plain).pathname).toBe('https://player.vimeo.com/video/76979871');
+    expect(Object.fromEntries(q(plain))).toEqual({ autoplay: '1', muted: '1', loop: '1' });
+    const hashed = q(withAutoplay('vimeo', 'https://player.vimeo.com/video/76979871?h=abc123def4'));
+    expect(hashed.get('h')).toBe('abc123def4');
+    expect(hashed.get('autoplay')).toBe('1');
+  });
+
+  it('leaves every other provider and unparsable URLs alone', () => {
+    const spotify = 'https://open.spotify.com/embed/track/4cOdK2wGLETKBW3PvgPWqT';
+    expect(withAutoplay('spotify', spotify)).toBe(spotify);
+    expect(withAutoplay('generic', 'https://example.com/a')).toBe('https://example.com/a');
+    expect(withAutoplay('youtube', 'not a url')).toBe('not a url');
+  });
+});
+
+describe('withJsApi', () => {
+  const yt = 'https://www.youtube-nocookie.com/embed/aqz-KE-bpKQ';
+
+  it('turns the YouTube player API on, with the page origin when it is http(s)', () => {
+    const u = new URL(withJsApi('youtube', yt, 'https://app.test'));
+    expect(u.origin + u.pathname).toBe(yt);
+    expect(Object.fromEntries(u.searchParams)).toEqual({ enablejsapi: '1', origin: 'https://app.test' });
+    expect(new URL(withJsApi('youtube', yt)).searchParams.has('origin')).toBe(false);
+    expect(new URL(withJsApi('youtube', yt, 'null')).searchParams.has('origin')).toBe(false);
+  });
+
+  it('keeps what the URL has, and combines with autoplay in either order', () => {
+    const a = new URL(withAutoplay('youtube', withJsApi('youtube', `${yt}?start=90`, 'https://app.test')));
+    expect(a.searchParams.get('start')).toBe('90');
+    expect(a.searchParams.get('enablejsapi')).toBe('1');
+    expect(a.searchParams.get('autoplay')).toBe('1');
+  });
+
+  it('leaves every other provider alone', () => {
+    const vimeo = 'https://player.vimeo.com/video/76979871';
+    expect(withJsApi('vimeo', vimeo, 'https://app.test')).toBe(vimeo);
+    expect(withJsApi('generic', 'https://example.com/a')).toBe('https://example.com/a');
+    expect(withJsApi('youtube', 'not a url')).toBe('not a url');
   });
 });
