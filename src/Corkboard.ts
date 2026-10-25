@@ -18,6 +18,7 @@ import { LayoutApi } from './LayoutApi';
 import type { Camera, Rect } from './math';
 import { createElement, kindOf, newId, sizeOf } from './model';
 import type { OverlayFactory, Overlay } from './overlay';
+import { FrameRateMonitor } from './render/frameRate';
 import { Stage, type StageOptions } from './render/stage';
 import { DARK_THEME, LIGHT_THEME, type Theme } from './render/theme';
 import { Store } from './store';
@@ -144,6 +145,8 @@ export class Corkboard {
   private readonly snapSettings: SnapSettings;
   private readonly overlayRoot: HTMLElement;
   private readonly videoLayer: VideoLayer;
+  // Measures the page's frame rate in short bursts for the layers that shed load when it is slow.
+  private readonly frameRate = new FrameRateMonitor();
   // The live iframes of the `embed` cards (see src/embed/layer.ts).
   readonly embeds: EmbedLayer;
   private readonly overlays: Overlay[] = [];
@@ -189,13 +192,17 @@ export class Corkboard {
     });
     host.appendChild(this.overlayRoot);
 
-    this.videoLayer = new VideoLayer({ root: this.overlayRoot, store: this.store, stage }, options.video);
+    this.videoLayer = new VideoLayer(
+      { root: this.overlayRoot, store: this.store, stage, frameRate: this.frameRate },
+      options.video,
+    );
     this.embeds = new EmbedLayer(
       {
         root: this.overlayRoot,
         host,
         store: this.store,
         stage,
+        frameRate: this.frameRate,
         emit: (type, payload) => this.emitter.emit(type, payload as CorkboardEvents[typeof type]),
       },
       options.embeds,
@@ -214,6 +221,8 @@ export class Corkboard {
       stage.onSettle(() => {
         this.videoLayer.onSettle();
         this.embeds.onSettle();
+        // Still camera: the cheapest moment to see what the page really costs.
+        this.frameRate.poke();
         for (const o of this.overlays) o.onSettle?.();
         this.emitter.emit('cameraSettled', { camera: { ...stage.cam.cam } });
       }),
@@ -397,6 +406,12 @@ export class Corkboard {
     return this.videoLayer.playing;
   }
 
+  // How many clips the always-playing pool may run now: `video.maxPlaying`, lowered while the page runs slow
+  // and raised back when it is smooth (compare with `playing.size`).
+  get videoBudget(): number {
+    return this.videoLayer.playingBudget;
+  }
+
   // Pauses every video (a lightbox open over the canvas, say).
   setVideoPaused(paused: boolean): void {
     this.videoLayer.setPaused(paused);
@@ -444,6 +459,7 @@ export class Corkboard {
     for (const f of this.cleanups) f();
     this.videoLayer.dispose();
     this.embeds.dispose();
+    this.frameRate.dispose();
     for (const o of this.overlays) o.dispose();
     this.overlayRoot.remove();
     this.stage.dispose();

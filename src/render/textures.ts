@@ -71,6 +71,15 @@ interface CardTex {
   // Last time the card was on screen, and last time it was on screen wanting an own texture.
   last: number;
   last2: number;
+  // The pictures (levels 1..3) of a poster that was swapped, still drawable until the first level of the new
+  // one is resident (see swapPictures). While it is set, `tex` holds no level 1..3.
+  outgoing: Outgoing | null;
+}
+
+interface Outgoing {
+  tex: (Texture | null)[];
+  cell: (AtlasCell<Page> | null)[];
+  ownBytes: number[];
 }
 
 interface Req {
@@ -300,6 +309,18 @@ export class TextureManager {
   best(card: BoardCard, desired: Level): { tex: Texture; level: Level } | null {
     const ct = this.cards.get(card.id);
     if (!ct) return null;
+    // A swapped poster whose new pictures have not landed: the old ones, not the ThumbHash, until they do.
+    const out = ct.outgoing;
+    if (out && desired > 0) {
+      for (let l = desired; l <= 3; l++) {
+        const t = out.tex[l];
+        if (t) return { tex: t, level: l as Level };
+      }
+      for (let l = desired - 1; l >= 1; l--) {
+        const t = out.tex[l];
+        if (t) return { tex: t, level: l as Level };
+      }
+    }
     for (let l = desired; l <= 3; l++) {
       const t = ct.tex[l];
       if (t) return { tex: t, level: l as Level };
@@ -309,6 +330,10 @@ export class TextureManager {
       if (t) return { tex: t, level: l as Level };
     }
     return null;
+  }
+
+  hasOutgoing(card: BoardCard): boolean {
+    return !!this.cards.get(card.id)?.outgoing;
   }
 
   // `needsOwn`: the card is on screen big enough to want an own texture (L2 / L3).
@@ -565,6 +590,7 @@ export class TextureManager {
       ct.ownCapped[level] = ct.ownLong[level] < req.maxLong;
       ct.ownBytes[level] = w * h * 4 * MIP_FACTOR;
       this.ownBytes += ct.ownBytes[level];
+      this.releaseOutgoing(ct);
       return;
     }
     const atlas = level === 0 ? this.atlas0 : this.atlas1;
@@ -585,6 +611,7 @@ export class TextureManager {
       source: cell.page.source,
       frame: new Rectangle(cell.x, cell.y, w, h),
     });
+    if (level === 1) this.releaseOutgoing(ct);
   }
 
   private cardTex(id: number): CardTex {
@@ -598,6 +625,7 @@ export class TextureManager {
         ownBytes: [0, 0, 0, 0],
         last: 0,
         last2: 0,
+        outgoing: null,
       };
       this.cards.set(id, ct);
     }
@@ -629,6 +657,7 @@ export class TextureManager {
     const ct = this.cards.get(id);
     if (!ct) return;
     this.cards.delete(id);
+    this.releaseOutgoing(ct);
     for (let level = 0; level < 4; level++) {
       const t = ct.tex[level];
       if (!t) continue;
@@ -639,6 +668,80 @@ export class TextureManager {
         this.retireTexture(t, false);
         const cell = ct.cell[level as 0 | 1];
         if (cell) this.releaseCell(level === 0 ? this.atlas0 : this.atlas1, cell);
+      }
+    }
+  }
+
+  // The card's pictures (levels 1..3) are another image now (its URLs changed; ThumbHash, size and corners did
+  // not): requests and failures for the old ones are dropped, and what is resident moves aside as `outgoing`
+  // instead of being forgotten. `best()` keeps drawing it until the first level of the new picture uploads, so
+  // the card goes picture -> picture and never shows the placeholder in between. `keep` false: nothing is
+  // kept (no new picture to wait for, or nobody looking). Level 0 is the same ThumbHash and stays.
+  swapPictures(id: number, keep: boolean): void {
+    for (let level = 1; level < 4; level++) {
+      const k = id * 4 + level;
+      const req = this.reqByKey.get(k);
+      if (req) {
+        this.reqByKey.delete(k);
+        this.cancelReq(req);
+        this.queue = this.queue.filter((r) => r !== req);
+      }
+      this.failedAt.delete(k);
+    }
+    this.decoded = this.decoded.filter((d) => {
+      if (d.req.card.id !== id || d.req.level === 0) return true;
+      d.bitmap.close();
+      this.decodedKeys.delete(key(d.req.card, d.req.level));
+      return false;
+    });
+    const ct = this.cards.get(id);
+    if (!ct) return;
+    const out: Outgoing = { tex: [null, null, null, null], cell: [null, null], ownBytes: [0, 0, 0, 0] };
+    let moved = false;
+    for (let level = 1; level < 4; level++) {
+      const t = ct.tex[level];
+      if (!t) continue;
+      moved = true;
+      out.tex[level] = t;
+      ct.tex[level] = null;
+      if (level >= 2) {
+        // Still counted in `ownBytes` until released.
+        out.ownBytes[level] = ct.ownBytes[level];
+        ct.ownBytes[level] = 0;
+        ct.ownLong[level] = 0;
+        ct.ownCapped[level] = false;
+      } else {
+        out.cell[1] = ct.cell[1];
+        ct.cell[1] = null;
+      }
+    }
+    // Nothing resident to keep drawing: an earlier outgoing set (no new level landed since) stays as it is.
+    if (moved) {
+      this.releaseOutgoing(ct);
+      ct.outgoing = out;
+    }
+    if (!keep) this.releaseOutgoing(ct);
+  }
+
+  dropOutgoing(card: BoardCard): void {
+    const ct = this.cards.get(card.id);
+    if (ct) this.releaseOutgoing(ct);
+  }
+
+  private releaseOutgoing(ct: CardTex): void {
+    const out = ct.outgoing;
+    if (!out) return;
+    ct.outgoing = null;
+    for (let level = 1; level < 4; level++) {
+      const t = out.tex[level];
+      if (!t) continue;
+      if (level >= 2) {
+        this.retireTexture(t, true);
+        this.ownBytes -= out.ownBytes[level];
+      } else {
+        this.retireTexture(t, false);
+        const cell = out.cell[1];
+        if (cell) this.releaseCell(this.atlas1, cell);
       }
     }
   }
@@ -814,6 +917,7 @@ export class TextureManager {
     const oldTextures: [Texture, boolean][] = [];
     for (const ct of this.cards.values()) {
       ct.tex.forEach((t, level) => t && oldTextures.push([t, level >= 2]));
+      ct.outgoing?.tex.forEach((t, level) => t && oldTextures.push([t, level >= 2]));
     }
     const old0 = this.atlas0;
     const old1 = this.atlas1;

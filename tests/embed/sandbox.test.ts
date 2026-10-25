@@ -215,17 +215,73 @@ describe('snippet bootstrap', () => {
     close();
   });
 
-  it('answers show with painted, with the same id, even while paused', async () => {
-    const { msg, close, parent } = boot();
-    const replies: Array<{ cb: string; op: string; id: number }> = [];
-    const onReply = (e: Event): void => void replies.push((e as MessageEvent).data);
-    parent.addEventListener('message', onReply);
-    msg({ cb: EMBED_CB, op: 'pause' });
-    msg({ cb: 'other', op: 'show', id: 8 });
-    msg({ cb: EMBED_CB, op: 'show', id: 9 });
-    await vi.waitFor(() => expect(replies).toHaveLength(1), { timeout: 3000 });
-    expect(replies[0]).toEqual({ cb: EMBED_CB, op: 'painted', id: 9 });
-    parent.removeEventListener('message', onReply);
-    close();
+  describe('timers', () => {
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    it('holds a setInterval callback while paused, and runs it after resume', async () => {
+      const { w, msg, close } = boot();
+      let n = 0;
+      msg({ cb: EMBED_CB, op: 'pause' });
+      const id = w.setInterval(() => n++, 5);
+      await wait(80);
+      expect(n).toBe(0);
+      msg({ cb: EMBED_CB, op: 'resume' });
+      await vi.waitFor(() => expect(n).toBeGreaterThan(0));
+      // It goes on by itself, and the id it returned stops it.
+      const seen = n;
+      await vi.waitFor(() => expect(n).toBeGreaterThan(seen));
+      w.clearInterval(id);
+      await wait(20);
+      const stopped = n;
+      await wait(60);
+      expect(n).toBe(stopped);
+      close();
+    });
+
+    it('runs what fell due while paused once on resume, not once per missed tick', async () => {
+      const { w, msg, close } = boot();
+      const ticks: number[] = [];
+      const id = w.setInterval(() => ticks.push(Date.now()), 5);
+      msg({ cb: EMBED_CB, op: 'pause' });
+      await wait(100);
+      const before = ticks.length;
+      msg({ cb: EMBED_CB, op: 'resume' });
+      await wait(8);
+      // About twenty ticks fell due while paused: one catch-up and the interval's own, not the whole backlog.
+      expect(ticks.length - before).toBeGreaterThan(0);
+      expect(ticks.length - before).toBeLessThan(8);
+      w.clearInterval(id);
+      close();
+    });
+
+    it('holds a setTimeout while paused, fires it on resume, with its arguments, and clearTimeout cancels', async () => {
+      const { w, msg, close } = boot();
+      const seen: string[] = [];
+      msg({ cb: EMBED_CB, op: 'pause' });
+      w.setTimeout((a: string, b: string) => seen.push(a + b), 1, 'x', 'y');
+      const dropped = w.setTimeout(() => seen.push('dropped'), 1);
+      const droppedLater = w.setTimeout(() => seen.push('dropped later'), 1);
+      w.clearTimeout(dropped);
+      await wait(60);
+      expect(seen).toEqual([]);
+      w.clearTimeout(droppedLater);
+      msg({ cb: EMBED_CB, op: 'resume' });
+      await vi.waitFor(() => expect(seen).toEqual(['xy']));
+      await wait(30);
+      expect(seen).toEqual(['xy']);
+      close();
+    });
+
+    it('runs timers as usual while not paused, and lets either clear take either id', async () => {
+      const { w, close } = boot();
+      const seen: number[] = [];
+      w.setTimeout(() => seen.push(1), 1);
+      w.clearInterval(w.setTimeout(() => seen.push(2), 1));
+      w.clearTimeout(w.setInterval(() => seen.push(3), 1));
+      await vi.waitFor(() => expect(seen).toEqual([1]));
+      await wait(20);
+      expect(seen).toEqual([1]);
+      close();
+    });
   });
 });

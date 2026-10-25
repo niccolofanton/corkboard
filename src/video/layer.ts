@@ -9,6 +9,7 @@
 // A card plays only while it is on screen and at least MIN_SCREEN_PX wide (hover / selection) and the
 // camera is not moving. The poster is the card's own texture, drawn by WebGL underneath the <video>.
 import type { Store } from '../store';
+import type { FrameRateMonitor } from '../render/frameRate';
 import type { Stage } from '../render/stage';
 import type { ElementId } from '../types';
 import { AmbientVideos } from './ambient';
@@ -40,6 +41,8 @@ export interface VideoLayerDeps {
   root: HTMLElement;
   store: Store;
   stage: Stage;
+  // The board's frame-rate monitor: with `mode: 'always'` the pool plays fewer clips while the page is slow.
+  frameRate?: FrameRateMonitor;
 }
 
 export class VideoLayer {
@@ -57,7 +60,7 @@ export class VideoLayer {
   private readonly cleanups: (() => void)[] = [];
 
   constructor(deps: VideoLayerDeps, options: VideoOptions = {}) {
-    const { root, store, stage } = deps;
+    const { root, store, stage, frameRate } = deps;
     this.store = store;
     this.stage = stage;
     this.overlay = new VideoOverlay(root);
@@ -79,6 +82,7 @@ export class VideoLayer {
         }),
       // Which cards the pool plays decides whether the hover overlay has anything to add.
       onChange: () => this.controller.recheck(),
+      frameRate,
     });
     this.controller = new VideoController({
       show: (id) => {
@@ -129,6 +133,11 @@ export class VideoLayer {
     const active = this.overlay.activeId;
     if (active !== null) ids.add(active);
     return ids;
+  }
+
+  // How many clips the pool may play now: `maxPlaying`, lowered while the page runs slow (read it with `playing`).
+  get playingBudget(): number {
+    return this.ambient.cap;
   }
 
   // The pointer is over a video card (null: none).

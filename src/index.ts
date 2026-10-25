@@ -44,4 +44,6 @@ export { hitTest } from './interact/hitTest';
 export { elementsInBox } from './interact/marquee';
 export type { Box } from './interact/geometry';
 export { VideoLayer } from './video/layer';
+export { FrameRateMonitor } from './render/frameRate';
+export type { FrameWindow, FrameRateDeps } from './render/frameRate';
 export * from './embed/index';

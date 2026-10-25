@@ -207,6 +207,140 @@ describe('Stage store events', () => {
   });
 });
 
+describe('Stage poster overrides', () => {
+  // A booted card whose L0 and L1 of the element's own picture are resident and on screen.
+  const resident = async (els: Element[] = [el('a')]) => {
+    const { stage, store } = await boot(els);
+    dom.drain();
+    land();
+    dom.drain();
+    const view = stage.viewOf(els[0].id) as MediaView;
+    expect(view.shown).toBeGreaterThanOrEqual(1);
+    return { stage, store, view, card: cardOf(stage, els[0].id) };
+  };
+  const urlsAsked = (): string[] => FakeWorker.all.flatMap((w) => w.loads.map((m) => m.url as string));
+
+  it('requests the override for every level instead of media.src and sizes, and keeps the ThumbHash', async () => {
+    const { stage, card } = await resident();
+    const hash = card.thumbhash;
+    stage.setPosterOverride('a', 'blob:p1');
+    dom.drain();
+    expect([card.l1Url, card.l2Url, card.l3Url]).toEqual(['blob:p1', 'blob:p1', 'blob:p1']);
+    expect(card.thumbhash).toBe(hash);
+    expect(stage.tm.has(card, 0)).toBe(true);
+    expect(urlsAsked()).toContain('blob:p1');
+  });
+
+  it('is used by a card that is built after it was set, and by a store update that leaves the media alone', async () => {
+    const { stage, store } = await boot([el('far', 100000, 0)]);
+    stage.setPosterOverride('far', 'blob:early');
+    dom.drain();
+    expect(cardOf(stage, 'far').l1Url).toBe('blob:early');
+    store.update('far', { x: 100010 });
+    dom.drain();
+    expect(cardOf(stage, 'far').l1Url).toBe('blob:early');
+  });
+
+  it('never shows the placeholder while the new picture decodes, then switches when its first level lands', async () => {
+    const { stage, view, card } = await resident();
+    const set = vi.spyOn(view, 'setTexture');
+    const old = view.shown;
+    stage.setPosterOverride('a', 'blob:p1');
+    dom.drain();
+    // The old picture is still what is on screen, and the stage knows it is not the poster yet.
+    expect(view.shown).toBe(old);
+    expect(stage.tm.hasOutgoing(card)).toBe(true);
+    expect(stage.posterShown('a')).toBe(false);
+    land();
+    dom.drain();
+    expect(stage.tm.hasOutgoing(card)).toBe(false);
+    expect(view.shown).toBeGreaterThanOrEqual(1);
+    expect(stage.posterShown('a')).toBe(true);
+    expect(set.mock.calls.some(([tex]) => tex === null)).toBe(false);
+  });
+
+  it('keeps the first picture on screen when it is replaced again before anything landed', async () => {
+    const { stage, view, card } = await resident();
+    const set = vi.spyOn(view, 'setTexture');
+    stage.setPosterOverride('a', 'blob:p1');
+    dom.drain();
+    stage.setPosterOverride('a', 'blob:p2');
+    dom.drain();
+    expect(stage.tm.hasOutgoing(card)).toBe(true);
+    expect(view.shown).toBeGreaterThanOrEqual(1);
+    // The request for the first one was cancelled; only the second is asked for.
+    land();
+    dom.drain();
+    expect(card.l1Url).toBe('blob:p2');
+    expect(stage.posterShown('a')).toBe(true);
+    expect(set.mock.calls.some(([tex]) => tex === null)).toBe(false);
+  });
+
+  it('goes back to the media of the element when the override is dropped, again without the placeholder', async () => {
+    const { stage, view, card } = await resident();
+    stage.setPosterOverride('a', 'blob:p1');
+    dom.drain();
+    land();
+    dom.drain();
+    const set = vi.spyOn(view, 'setTexture');
+    stage.setPosterOverride('a', null);
+    dom.drain();
+    expect(card.l1Url).toBe('a.jpg');
+    expect(view.shown).toBeGreaterThanOrEqual(1);
+    land();
+    dom.drain();
+    expect(stage.posterShown('a')).toBe(true);
+    expect(set.mock.calls.some(([tex]) => tex === null)).toBe(false);
+  });
+
+  it('lets go of the old picture when there is nothing to swap to', async () => {
+    const { stage } = await boot([el('b', 0, 0, 200, 100, { thumbhash: HASH })]);
+    dom.drain();
+    // The card has no picture of its own: the override is its only one.
+    stage.setPosterOverride('b', 'blob:p1');
+    dom.drain();
+    land();
+    dom.drain();
+    const view = stage.viewOf('b') as MediaView;
+    const card = cardOf(stage, 'b');
+    expect(view.shown).toBeGreaterThanOrEqual(1);
+    stage.setPosterOverride('b', null);
+    dom.drain();
+    expect(card.l1Url).toBeUndefined();
+    expect(stage.tm.hasOutgoing(card)).toBe(false);
+    expect(view.shown).toBeLessThan(1);
+  });
+
+  it('keeps a card that is off screen from holding the old picture', async () => {
+    const { stage, store } = await boot([el('far', 100000, 0)]);
+    dom.drain();
+    land();
+    dom.drain();
+    const card = cardOf(stage, 'far');
+    stage.setPosterOverride('far', 'blob:p1');
+    dom.drain();
+    expect(card.l1Url).toBe('blob:p1');
+    expect(stage.tm.hasOutgoing(card)).toBe(false);
+    expect(stage.tm.has(card, 0)).toBe(true);
+    void store;
+  });
+
+  it('is dropped with its element, and by a reload that no longer has it', async () => {
+    const { stage, store } = await resident([el('a'), el('c', 300, 0)]);
+    const posters = () => (stage as unknown as { posters: Map<string, string> }).posters;
+    stage.setPosterOverride('a', 'blob:p1');
+    stage.setPosterOverride('c', 'blob:p2');
+    expect(posters().size).toBe(2);
+    store.remove(['a']);
+    dom.drain();
+    expect(posters().has('a')).toBe(false);
+    store.clear();
+    store.add([el('d', 0, 0)], 'load');
+    dom.drain();
+    expect(posters().size).toBe(0);
+  });
+});
+
 describe('Stage baked corner radius', () => {
   // A mounted card with its ThumbHash texture landed, 200 x 100.
   const landed = async () => {

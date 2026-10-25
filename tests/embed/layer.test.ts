@@ -15,23 +15,48 @@ import {
   LOAD_SLOT_MS,
   MAX_LOADING,
   MAX_SNAPSHOTS,
-  REVEAL_MAX_MS,
-  REVEAL_MS,
+  PREVIEW_JOB_MS,
+  PREVIEW_SETTLE_MS,
 } from '../../src/embed/layer';
 import { createElement } from '../../src/model';
+import { FrameRateMonitor } from '../../src/render/frameRate';
 import { DARK_THEME } from '../../src/render/theme';
 import type { Stage } from '../../src/render/stage';
 import { Store } from '../../src/store';
 import type { ElementInit } from '../../src/types';
 
 const VIEW = { w: 1600, h: 1000 };
+// jsdom fires a `load` of its own on every iframe it attaches, a turn after the layer mounts it. The layer treats
+// every load as a new document, so only the ones a test sends (made here) reach it.
+const sent = new WeakSet<Event>();
+const loadEvent = (): Event => {
+  const e = new Event('load');
+  sent.add(e);
+  return e;
+};
 // Cards whose poster texture has not landed on the fake stage yet.
 const unlanded = new Set<string>();
 
 // `fitRect` lands at once, the way the real camera does when its fly is over (clamped to `maxScale`).
+const stageOf = new WeakMap<Store, { overrides: Map<string, string> }>();
+// The runtime poster the layer set on a card (never in the store).
+const posterOf = (store: Store, id: string): string | undefined => stageOf.get(store)?.overrides.get(id);
+
 function fakeStage(store: Store, scale = 1, maxScale = 4) {
   const cam = { tx: 0, ty: 0, scale };
+  // Runtime posters by card, the way the stage keeps them (a removed card drops its own).
+  const overrides = new Map<string, string>();
   const stage = {
+    overrides,
+    // Every call, in order: null is a drop.
+    overrideCalls: [] as [string, string | null][],
+    setPosterOverride(id: string, url: string | null) {
+      this.overrideCalls.push([id, url]);
+      if (url === null) overrides.delete(id);
+      else overrides.set(id, url);
+    },
+    // The sprite of a card shows its current poster unless a test says its texture has not landed.
+    posterShown: (id: string) => !unlanded.has(id),
     cam: {
       cam,
       get scale() {
@@ -43,8 +68,6 @@ function fakeStage(store: Store, scale = 1, maxScale = 4) {
     },
     activeTheme: DARK_THEME,
     previewRectOf: () => undefined,
-    // The sprite of a card shows a rendition (level >= 1) unless a test says its texture has not landed.
-    viewOf: (id: string) => ({ variant: 'media', shown: unlanded.has(id) ? -1 : 1 }),
     markDirty: () => {},
     fitRect: vi.fn((r: { x0: number; y0: number; x1: number; y1: number }, _animate?: boolean, pad = 48) => {
       const w = Math.max(1, r.x1 - r.x0);
@@ -59,7 +82,8 @@ function fakeStage(store: Store, scale = 1, maxScale = 4) {
       return { x0: el.x, y0: el.y, x1: el.x + el.w, y1: el.y + el.h };
     },
   };
-  return { stage: stage as unknown as Stage, cam };
+  stageOf.set(store, stage);
+  return { stage: stage as unknown as Stage & { overrides: Map<string, string>; overrideCalls: [string, string | null][] }, cam };
 }
 
 let n = 0;
@@ -69,7 +93,11 @@ const embed = (init: Partial<ElementInit> & Pick<ElementInit, 'media'>) =>
 let host: HTMLElement;
 let root: HTMLElement;
 let events: Array<[string, unknown]>;
+const dropJsdomLoad = (e: Event): void => {
+  if (!sent.has(e)) e.stopImmediatePropagation();
+};
 beforeEach(() => {
+  document.addEventListener('load', dropJsdomLoad, true);
   vi.stubGlobal('fetch', () => Promise.reject(new Error('no network in tests')));
   document.body.innerHTML = '<div id="host" tabindex="0"><div id="root"></div></div>';
   host = document.getElementById('host') as HTMLElement;
@@ -77,7 +105,12 @@ beforeEach(() => {
   events = [];
   unlanded.clear();
 });
+// Layers a test made and did not dispose: their timers (a preview job's, a heartbeat) would otherwise fire in a
+// later test and put studios or frames in its document.
+const made: EmbedLayer[] = [];
 afterEach(() => {
+  for (const l of made.splice(0)) l.dispose();
+  document.removeEventListener('load', dropJsdomLoad, true);
   vi.unstubAllGlobals();
   vi.useRealTimers();
   drawTile.mockReset();
@@ -94,10 +127,13 @@ function make(scale = 1, opts = {}, maxScale = 4, deps: Partial<EmbedLayerDeps> 
       store,
       stage,
       emit: <K extends keyof EmbedEvents>(type: K, payload: EmbedEvents[K]) => void events.push([type, payload]),
+      // Nothing rasterises in jsdom: every picture is a small blob unless a test says otherwise.
+      rasterize: async () => new Blob(['img'], { type: 'image/webp' }),
       ...deps,
     },
     opts,
   );
+  made.push(layer);
   const frames = () => [...root.querySelectorAll<HTMLIFrameElement>('.cb-embed iframe')];
   // What the board does: a frame after the change, then the camera settles.
   const tick = () => {
@@ -126,6 +162,16 @@ describe('EmbedLayer', () => {
     expect(f[0].getAttribute('loading')).toBe('lazy');
     expect(f[0].getAttribute('allow')).toContain('encrypted-media');
     expect(events).toContainEqual(['embedLive', expect.objectContaining({ live: true })]);
+  });
+
+  it('rounds the frame like the card: the radius scaled from world px to the layout box', () => {
+    const { store, tick } = make();
+    store.add([embed({ ...yt(), w: 480, h: 270, radius: 12 })]);
+    tick();
+    const w = root.querySelector<HTMLElement>('.cb-embed') as HTMLElement;
+    // 270 world px tall is laid out 720 px tall (the 720p virtual screen): 12 x 720 / 270.
+    expect(parseFloat(w.style.borderRadius)).toBeCloseTo((12 * parseFloat(w.style.width)) / 480, 1);
+    expect(parseFloat(w.style.borderRadius)).toBeGreaterThan(12);
   });
 
   it('runs a snippet through srcdoc with scripts only and the CSP', () => {
@@ -557,7 +603,7 @@ describe('EmbedLayer', () => {
       const el = embed({ media: { src: 'blob:http://localhost/dead', embed: { url: 'https://example.com/post' } } });
       store.add([el]);
       await vi.waitFor(() => expect(resolved()).toHaveLength(1));
-      expect(store.get(el.id)?.media.src).toBe('blob:made-0');
+      expect(posterOf(store, el.id)).toBe('blob:made-0');
       expect(resolved()[0].poster).toBeUndefined();
     });
 
@@ -570,7 +616,7 @@ describe('EmbedLayer', () => {
       expect(resolved().find((r) => r.id === own.id)?.poster).toBeUndefined();
       expect(resolved().find((r) => r.id === host.id)?.poster).toBe('https://cdn.example/p.jpg');
       expect(store.get(host.id)?.media.src).toBe('https://cdn.example/p.jpg');
-      expect(store.get(own.id)?.media.src).toBe('blob:made-0');
+      expect(posterOf(store, own.id)).toBe('blob:made-0');
     });
 
     it('redraws its tile when only the title changes, without resolving again', async () => {
@@ -585,13 +631,61 @@ describe('EmbedLayer', () => {
       store.update(el.id, { media: { ...media, embed: { ...media.embed!, title: 'New' } } });
       await vi.waitFor(() => expect(drawTile).toHaveBeenCalledTimes(2));
       expect(drawTile.mock.calls[1][0].title).toBe('New');
-      await vi.waitFor(() => expect(store.get(el.id)?.media.src).toBe('blob:made-1'));
+      await vi.waitFor(() => expect(posterOf(store, el.id)).toBe('blob:made-1'));
       // Dropping the card's own title falls back to the resolver's.
       const media2 = store.get(el.id)!.media;
       store.update(el.id, { media: { ...media2, embed: { url: 'https://example.com/a' } } });
       await vi.waitFor(() => expect(drawTile).toHaveBeenCalledTimes(3));
       expect(drawTile.mock.calls[2][0].title).toBe('From resolver');
       expect(resolve).toHaveBeenCalledTimes(1);
+    });
+
+    it('never writes a poster to the store: the card keeps the media the host gave it and no change is emitted', async () => {
+      const { store } = make();
+      const own = embed({ media: { embed: { url: 'https://example.com/a', title: 'T' } } });
+      const dead = embed({ media: { src: 'blob:http://localhost/dead', embed: { url: 'https://example.com/b' } } });
+      store.add([own, dead]);
+      await vi.waitFor(() => expect(resolved()).toHaveLength(2));
+      expect(posterOf(store, own.id)).toBe('blob:made-0');
+      const changes: unknown[] = [];
+      store.subscribe((e) => void changes.push(e));
+      // A tile redrawn for a new title is one more poster, still no store change.
+      const media = store.get(own.id)!.media;
+      store.update(own.id, { media: { ...media, embed: { ...media.embed!, title: 'New' } } });
+      changes.length = 0;
+      await vi.waitFor(() => expect(posterOf(store, own.id)).toBe('blob:made-2'));
+      expect(changes).toEqual([]);
+      expect(store.get(own.id)?.media.src).toBeUndefined();
+      // The dead blob of an old saved board is left as it was: the override stands in for it.
+      expect(store.get(dead.id)?.media.src).toBe('blob:http://localhost/dead');
+    });
+
+    it('lets a picture of the host\'s win over a tile, also when it comes later, and gives the tile back when it goes', async () => {
+      const { store, stage } = make();
+      const el = embed({ media: { embed: { url: 'https://example.com/a' } } });
+      store.add([el]);
+      await vi.waitFor(() => expect(resolved()).toHaveLength(1));
+      expect(posterOf(store, el.id)).toBe('blob:made-0');
+      const media = store.get(el.id)!.media;
+      store.update(el.id, { media: { ...media, src: 'https://cdn.example/p.jpg' } });
+      expect(posterOf(store, el.id)).toBeUndefined();
+      store.update(el.id, { media: { ...media, src: undefined } });
+      expect(posterOf(store, el.id)).toBe('blob:made-0');
+      expect(stage.overrideCalls.map(([, u]) => u)).toEqual(['blob:made-0', null, 'blob:made-0']);
+    });
+
+    it('drops its poster with the card, and when the embed changes to a host\'s picture', async () => {
+      const { store, stage } = make();
+      const el = embed({ media: { embed: { url: 'https://example.com/a' } } });
+      store.add([el]);
+      await vi.waitFor(() => expect(resolved()).toHaveLength(1));
+      // Another page and a picture of the host's at once: the old tile has nothing left to stand in for.
+      store.update(el.id, { media: { src: 'https://cdn.example/q.jpg', embed: { url: 'https://example.com/other' } } });
+      expect(posterOf(store, el.id)).toBeUndefined();
+      expect(stage.overrideCalls.at(-1)).toEqual([el.id, null]);
+      // The card going away is the stage's to handle (it drops overrides with their element).
+      store.remove([el.id]);
+      await vi.waitFor(() => expect(resolved().length).toBeGreaterThan(0));
     });
 
     it('dispose revokes the blobs still waiting for their delayed revoke', async () => {
@@ -768,7 +862,7 @@ describe('EmbedLayer', () => {
       tick();
       expect(frames()).toHaveLength(MAX_LOADING);
       expect(layer.loading.size).toBe(MAX_LOADING);
-      for (const f of frames()) f.dispatchEvent(new Event('load'));
+      for (const f of frames()) f.dispatchEvent(loadEvent());
       expect(layer.loading.size).toBe(0);
       tick();
       expect(frames()).toHaveLength(MAX_LOADING * 2);
@@ -950,7 +1044,7 @@ describe('EmbedLayer', () => {
     const frameOf = (i: number) =>
       [...root.querySelectorAll<HTMLIFrameElement>('.cb-embed iframe')].find((f) => f.getAttribute('srcdoc')?.includes(`<i>${i}</i>`)) as HTMLIFrameElement;
     const spy = (f: HTMLIFrameElement) => vi.spyOn(f.contentWindow as Window, 'postMessage').mockImplementation(() => {});
-    const load = (f: HTMLIFrameElement) => f.dispatchEvent(new Event('load'));
+    const load = (f: HTMLIFrameElement) => f.dispatchEvent(loadEvent());
     const ops = (p: ReturnType<typeof spy>, op: string) =>
       p.mock.calls.filter(([m]) => (m as { op?: string })?.op === op).map(([m]) => m as { id: number; w: number; h: number });
     const reply = (f: HTMLIFrameElement, data: unknown, source: unknown = f.contentWindow) =>
@@ -970,7 +1064,13 @@ describe('EmbedLayer', () => {
       t.tick();
       return { ...t, el, f, post, w: wrapperOf(f) };
     };
+    const SVG = '<svg><foreignObject/></svg>';
     const blob = () => new Blob(['img'], { type: 'image/webp' });
+    // The frame answers with its markup and the layer draws it (the default test rasterizer resolves a blob).
+    const answer = async (f: HTMLIFrameElement, id: number) => {
+      reply(f, { cb: CB, op: 'snapshot', id, ok: true, svg: SVG });
+      await vi.advanceTimersByTimeAsync(0);
+    };
     // The poster texture lands, and the layer looks again.
     const land = () => vi.advanceTimersByTime(250);
 
@@ -1022,13 +1122,13 @@ describe('EmbedLayer', () => {
     };
 
     it('draws the SVG a frame answers with, at the size it asked for, and freezes on it', async () => {
-      const rasterize = vi.fn(async () => blob());
+      const rasterize = vi.fn(async () => new Blob(['img'], { type: 'image/webp' }));
       const { store, el, f, post, w } = smallSvg(rasterize);
       const [req] = ops(post, 'snapshot');
       reply(f, { cb: CB, op: 'snapshot', id: req.id, ok: true, svg: '<svg><foreignObject/></svg>' });
       expect(rasterize).toHaveBeenCalledWith('<svg><foreignObject/></svg>', req.w, req.h);
       await vi.advanceTimersByTimeAsync(0);
-      expect(store.get(el.id)?.media.src).toBe('blob:snap-0');
+      expect(posterOf(store, el.id)).toBe('blob:snap-0');
       land();
       expect(w.dataset.frozen).toBeDefined();
     });
@@ -1049,11 +1149,11 @@ describe('EmbedLayer', () => {
       expect(w.dataset.frozen).toBeUndefined();
     });
 
-    it('shows the snapshot as the poster, then hides the frame once its texture shows', () => {
+    it('shows the snapshot as the poster, then hides the frame once its texture shows', async () => {
       const { store, layer, el, f, post, w } = small();
       const [req] = ops(post, 'snapshot');
-      reply(f, { cb: CB, op: 'snapshot', id: req.id, ok: true, blob: blob() });
-      expect(store.get(el.id)?.media.src).toBe('blob:snap-0');
+      await answer(f, req.id);
+      expect(posterOf(store, el.id)).toBe('blob:snap-0');
       // Not before the poster shows: the frame covers the card until then.
       expect(w.dataset.frozen).toBeUndefined();
       land();
@@ -1066,10 +1166,29 @@ describe('EmbedLayer', () => {
       expect(w.isConnected).toBe(true);
     });
 
-    it('waits while the poster has not landed, and leaves the frame live if it never does', () => {
+    it('puts the snapshot over a picture of the host\'s without touching the store, and drops it again with the card', async () => {
+      const t = make(1, ALL);
+      const el = snippet(0, { media: { src: 'https://cdn.example/p.jpg', embed: { html: '<i>0</i>' } } });
+      t.store.add([el]);
+      t.tick();
+      const f = frameOf(0);
+      load(f);
+      const post = spy(f);
+      t.cam.scale = 0.2;
+      t.tick();
+      const changes: unknown[] = [];
+      t.store.subscribe((e) => void changes.push(e));
+      await answer(f, ops(post, 'snapshot')[0].id);
+      // The real picture of the snippet wins over the host's poster; the host's own value stays in the store.
+      expect(posterOf(t.store, el.id)).toBe('blob:snap-0');
+      expect(t.store.get(el.id)?.media.src).toBe('https://cdn.example/p.jpg');
+      expect(changes).toEqual([]);
+    });
+
+    it('waits while the poster has not landed, and leaves the frame live if it never does', async () => {
       const { layer, el, f, post, w } = small();
       unlanded.add(el.id);
-      reply(f, { cb: CB, op: 'snapshot', id: ops(post, 'snapshot')[0].id, ok: true, blob: blob() });
+      await answer(f, ops(post, 'snapshot')[0].id);
       vi.advanceTimersByTime(1000);
       expect(w.dataset.frozen).toBeUndefined();
       unlanded.delete(el.id);
@@ -1077,32 +1196,34 @@ describe('EmbedLayer', () => {
       expect(layer.frozen.has(el.id)).toBe(true);
     });
 
-    it('leaves the frame live when the poster never lands', () => {
+    it('leaves the frame live when the poster never lands', async () => {
       const { layer, el, f, post, w } = small();
       unlanded.add(el.id);
-      reply(f, { cb: CB, op: 'snapshot', id: ops(post, 'snapshot')[0].id, ok: true, blob: blob() });
+      await answer(f, ops(post, 'snapshot')[0].id);
       vi.advanceTimersByTime(10000);
       expect(layer.frozen.has(el.id)).toBe(false);
       expect(w.dataset.frozen).toBeUndefined();
     });
 
-    it('ignores replies from another source or with another id', () => {
+    it('ignores replies from another source or with another id', async () => {
       const { store, el, f, post, w, tick } = small();
       const [req] = ops(post, 'snapshot');
       const other = make(1, ALL);
       other.store.add([snippet(1)]);
       other.tick();
       const stranger = frameOf(1);
-      reply(f, { cb: CB, op: 'snapshot', id: req.id, ok: true, blob: blob() }, stranger.contentWindow);
-      reply(f, { cb: CB, op: 'snapshot', id: req.id, ok: true, blob: blob() }, window);
-      reply(f, { cb: CB, op: 'snapshot', id: req.id + 1, ok: true, blob: blob() });
-      reply(f, { cb: 'other', op: 'snapshot', id: req.id, ok: true, blob: blob() });
-      expect(store.get(el.id)?.media.src).toBeUndefined();
+      const svg = (id: number, cb = CB) => ({ cb, op: 'snapshot', id, ok: true, svg: SVG });
+      reply(f, svg(req.id), stranger.contentWindow);
+      reply(f, svg(req.id), window);
+      reply(f, svg(req.id + 1));
+      reply(f, svg(req.id, 'other'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(posterOf(store, el.id)).toBeUndefined();
       land();
       expect(w.dataset.frozen).toBeUndefined();
       // The real reply still works afterwards.
-      reply(f, { cb: CB, op: 'snapshot', id: req.id, ok: true, blob: blob() });
-      expect(store.get(el.id)?.media.src).toBe('blob:snap-0');
+      await answer(f, req.id);
+      expect(posterOf(store, el.id)).toBe('blob:snap-0');
       tick();
     });
 
@@ -1122,9 +1243,9 @@ describe('EmbedLayer', () => {
       expect(ops(post, 'snapshot')).toHaveLength(2);
     });
 
-    it('counts a reply without a picture as a failure', () => {
+    it('counts a reply without markup as a failure, and no longer takes a picture drawn by the frame', () => {
       const { layer, f, post, w, tick } = small();
-      reply(f, { cb: CB, op: 'snapshot', id: ops(post, 'snapshot')[0].id, ok: true, blob: 'not a blob' });
+      reply(f, { cb: CB, op: 'snapshot', id: ops(post, 'snapshot')[0].id, ok: true, blob: blob() });
       land();
       tick();
       expect(layer.frozen.size).toBe(0);
@@ -1162,9 +1283,9 @@ describe('EmbedLayer', () => {
       expect(asked().reduce((a, b) => a + b)).toBe(n);
     });
 
-    it('shows the frame again at once when the card grows past 1.4x, not before', () => {
+    it('shows the frame again at once when the card grows past 1.4x, not before', async () => {
       const { layer, cam, el, f, post, w, tick } = small();
-      reply(f, { cb: CB, op: 'snapshot', id: ops(post, 'snapshot')[0].id, ok: true, blob: blob() });
+      await answer(f, ops(post, 'snapshot')[0].id);
       land();
       expect(layer.frozen.has(el.id)).toBe(true);
       cam.scale = 0.5; // 150 px: over 140, under 196
@@ -1181,9 +1302,9 @@ describe('EmbedLayer', () => {
       expect(ops(post, 'snapshot')).toHaveLength(2);
     });
 
-    it('shows the frame when its card is selected or enters interact mode', () => {
+    it('shows the frame when its card is selected or enters interact mode', async () => {
       const { layer, cam, el, f, post, w, tick } = small();
-      reply(f, { cb: CB, op: 'snapshot', id: ops(post, 'snapshot')[0].id, ok: true, blob: blob() });
+      await answer(f, ops(post, 'snapshot')[0].id);
       land();
       expect(layer.frozen.has(el.id)).toBe(true);
       layer.setSelection([el.id]);
@@ -1192,7 +1313,7 @@ describe('EmbedLayer', () => {
       layer.setSelection([]);
       tick();
       expect(ops(post, 'snapshot')).toHaveLength(2);
-      reply(f, { cb: CB, op: 'snapshot', id: ops(post, 'snapshot')[1].id, ok: true, blob: blob() });
+      await answer(f, ops(post, 'snapshot')[1].id);
       land();
       expect(layer.frozen.has(el.id)).toBe(true);
       cam.scale = 0.3; // still small, over the minimum zoom to interact
@@ -1203,32 +1324,166 @@ describe('EmbedLayer', () => {
       expect(ops(post, 'resume')).toHaveLength(2);
     });
 
-    it('drops an answer that arrives after the card grew, and one for a destroyed frame', () => {
+    it('drops an answer that arrives after the card grew, and one for a destroyed frame', async () => {
       const { store, cam, el, f, post, w, tick } = small();
       const [req] = ops(post, 'snapshot');
       cam.scale = 1;
       tick();
-      reply(f, { cb: CB, op: 'snapshot', id: req.id, ok: true, blob: blob() });
+      await answer(f, req.id);
       land();
-      expect(store.get(el.id)?.media.src).toBeUndefined();
+      expect(posterOf(store, el.id)).toBeUndefined();
       expect(w.dataset.frozen).toBeUndefined();
     });
 
     it('never reports a snapshot blob as the persistable poster', async () => {
       const t = small();
-      reply(t.f, { cb: CB, op: 'snapshot', id: ops(t.post, 'snapshot')[0].id, ok: true, blob: blob() });
+      await answer(t.f, ops(t.post, 'snapshot')[0].id);
       await Promise.resolve();
-      expect(t.store.get(t.el.id)?.media.src).toBe('blob:snap-0');
+      expect(posterOf(t.store, t.el.id)).toBe('blob:snap-0');
       expect(events.filter(([type]) => type === 'embedResolved').every(([, p]) => (p as { poster?: string }).poster === undefined)).toBe(true);
     });
 
-    it('keeps its snapshot when the theme changes (a tile would replace the last frame)', () => {
+    it('keeps its snapshot when the theme changes (a tile would replace the last frame)', async () => {
       const { layer, store, el, f, post } = small();
-      reply(f, { cb: CB, op: 'snapshot', id: ops(post, 'snapshot')[0].id, ok: true, blob: blob() });
+      await answer(f, ops(post, 'snapshot')[0].id);
       drawTile.mockClear();
       layer.setTheme();
       expect(drawTile).not.toHaveBeenCalled();
-      expect(store.get(el.id)?.media.src).toBe('blob:snap-0');
+      expect(posterOf(store, el.id)).toBe('blob:snap-0');
+    });
+
+    it('asks once per freeze: the frame stays busy until the picture it sent is drawn and applied', async () => {
+      let drawn!: (b: Blob | null) => void;
+      const rasterize = vi.fn(() => new Promise<Blob | null>((r) => (drawn = r)));
+      const { layer, store, el, f, post, w, tick } = smallSvg(rasterize);
+      const [req] = ops(post, 'snapshot');
+      reply(f, { cb: CB, op: 'snapshot', id: req.id, ok: true, svg: SVG });
+      expect(rasterize).toHaveBeenCalledTimes(1);
+      // The slot is free for the others, but plans keep coming while the picture is drawn: this frame is not asked again.
+      for (let i = 0; i < 4; i++) {
+        tick();
+        layer.setSelection([]);
+        vi.advanceTimersByTime(500);
+      }
+      expect(ops(post, 'snapshot')).toHaveLength(1);
+      expect(posterOf(store, el.id)).toBeUndefined();
+      drawn(blob());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(posterOf(store, el.id)).toBe('blob:snap-0');
+      tick();
+      expect(ops(post, 'snapshot')).toHaveLength(1);
+      land();
+      expect(w.dataset.frozen).toBeDefined();
+      tick();
+      vi.advanceTimersByTime(5000);
+      // One freeze, one snapshot, one texture swap.
+      expect(ops(post, 'snapshot')).toHaveLength(1);
+      expect(made).toBe(1);
+    });
+
+    it('frees the snapshot slot at the reply, while the picture is still being drawn', () => {
+      const t = make(1, ALL, 4, { rasterize: () => new Promise<Blob | null>(() => {}) });
+      const n = MAX_SNAPSHOTS + 1;
+      t.store.add(Array.from({ length: n }, (_, i) => snippet(i, { x: (i % 4) * 500, y: Math.floor(i / 4) * 350 })));
+      t.tick();
+      const posts = Array.from({ length: n }, (_, i) => {
+        load(frameOf(i));
+        return spy(frameOf(i));
+      });
+      t.cam.scale = 0.2;
+      t.tick();
+      const asked = () => posts.reduce((a, p) => a + ops(p, 'snapshot').length, 0);
+      expect(asked()).toBe(MAX_SNAPSHOTS);
+      const first = posts.findIndex((p) => ops(p, 'snapshot').length > 0);
+      reply(frameOf(first), { cb: CB, op: 'snapshot', id: ops(posts[first], 'snapshot')[0].id, ok: true, svg: SVG });
+      t.tick();
+      // The one left over asks; the one that replied does not ask again.
+      expect(asked()).toBe(n);
+      expect(ops(posts[first], 'snapshot')).toHaveLength(1);
+    });
+
+    describe('a frame that loads again', () => {
+      it('is sent its pause again: the new document knows nothing of the old one', () => {
+        const t = make(1, { ...ALL, freezePx: 0 });
+        t.store.add([snippet(0), snippet(1)]);
+        t.tick();
+        const fs = [frameOf(0), frameOf(1)];
+        const posts = fs.map(spy);
+        fs.forEach(load);
+        t.layer.setOptions({ maxLive: 1 });
+        t.tick();
+        const i = fs.findIndex((f) => wrapperOf(f).dataset.parked !== undefined);
+        expect(i).toBeGreaterThanOrEqual(0);
+        expect(ops(posts[i], 'pause')).toHaveLength(1);
+        // The snippet reloads itself.
+        load(fs[i]);
+        expect(ops(posts[i], 'pause')).toHaveLength(2);
+        expect(ops(posts[1 - i], 'pause')).toHaveLength(0);
+        // A frame that was running is not told anything it did not need to hear.
+        load(fs[1 - i]);
+        expect(posts[1 - i].mock.calls).toEqual([]);
+        // And a resume goes out as usual afterwards.
+        t.layer.setOptions({ maxLive: 2 });
+        t.tick();
+        expect(ops(posts[i], 'resume')).toHaveLength(1);
+      });
+
+      it('drops the snapshot of the old document and asks the new one', () => {
+        const { store, el, f, post, w, tick } = small();
+        const [req] = ops(post, 'snapshot');
+        load(f);
+        // The reply of the old document is not a picture of the new one.
+        reply(f, { cb: CB, op: 'snapshot', id: req.id, ok: true, svg: SVG });
+        expect(posterOf(store, el.id)).toBeUndefined();
+        tick();
+        const asked = ops(post, 'snapshot');
+        expect(asked).toHaveLength(2);
+        expect(asked[1].id).not.toBe(req.id);
+        expect(w.dataset.frozen).toBeUndefined();
+      });
+
+      it('keeps a frozen frame frozen, and pauses the new document', async () => {
+        const { layer, el, f, post, w, tick } = small();
+        await answer(f, ops(post, 'snapshot')[0].id);
+        land();
+        expect(layer.frozen.has(el.id)).toBe(true);
+        expect(ops(post, 'pause')).toHaveLength(1);
+        load(f);
+        tick();
+        expect(layer.frozen.has(el.id)).toBe(true);
+        expect(w.dataset.frozen).toBeDefined();
+        expect(ops(post, 'pause')).toHaveLength(2);
+        // Its picture is still the poster: nothing is asked.
+        expect(ops(post, 'snapshot')).toHaveLength(1);
+      });
+
+      it('forgets that the last snapshot failed: the new document gets its tries', () => {
+        const { f, post, tick } = small();
+        reply(f, { cb: CB, op: 'snapshot', id: ops(post, 'snapshot')[0].id, ok: false });
+        tick();
+        expect(ops(post, 'snapshot')).toHaveLength(1);
+        load(f);
+        tick();
+        expect(ops(post, 'snapshot')).toHaveLength(2);
+      });
+
+      it('does not leak the timer of a video player\'s first load', () => {
+        const t = make(1, { ...ALL, autoplay: true });
+        t.store.add([embed({ media: { embed: { url: 'https://youtu.be/aqz-KE-bpKQ' } }, w: 480, h: 270 })]);
+        t.cam.scale = 0.2;
+        t.tick();
+        const f = t.frames()[0];
+        const post = spy(f);
+        const funcs = () => post.mock.calls.map(([m]) => (JSON.parse(m as string) as { func: string }).func);
+        load(f);
+        const timers = vi.getTimerCount();
+        load(f);
+        expect(vi.getTimerCount()).toBe(timers);
+        expect(funcs()).toEqual(['pauseVideo', 'pauseVideo']);
+        vi.advanceTimersByTime(2000);
+        // One resend, not one per load.
+        expect(funcs()).toEqual(['pauseVideo', 'pauseVideo', 'pauseVideo']);
+      });
     });
 
     describe('leaving and returning the view', () => {
@@ -1265,178 +1520,119 @@ describe('EmbedLayer', () => {
         t.layer.onFrame(true);
       };
 
-      describe('reveal', () => {
-        it('makes a page transparent when it returns, for REVEAL_MS', () => {
-          const t = video();
-          away(t);
-          expect(t.w.dataset.culled).toBeDefined();
-          expect(t.w.dataset.revealing).toBeUndefined();
-          back(t);
-          expect(t.w.dataset.culled).toBeUndefined();
-          expect(t.w.dataset.revealing).toBeDefined();
-          vi.advanceTimersByTime(REVEAL_MS - 1);
-          expect(t.w.dataset.revealing).toBeDefined();
-          vi.advanceTimersByTime(1);
-          expect(t.w.dataset.revealing).toBeUndefined();
-        });
-
-        it('asks a snippet to show, and clears on its painted, from that frame and that id only', () => {
-          const t = one();
-          away(t);
-          vi.advanceTimersByTime(CULL_SNAPSHOT_MS);
-          expect(t.w.dataset.culled).toBeDefined();
-          back(t);
-          expect(t.w.dataset.revealing).toBeDefined();
-          const shows = ops(t.post, 'show');
-          expect(shows).toHaveLength(1);
-          const id = shows[0].id;
-          reply(t.f, { cb: CB, op: 'painted', id: id + 1 });
-          reply(t.f, { cb: 'other', op: 'painted', id });
-          reply(t.f, { cb: CB, op: 'painted', id }, window);
-          reply(t.f, { cb: CB, op: 'painted', id }, document.createElement('iframe').contentWindow);
-          expect(t.w.dataset.revealing).toBeDefined();
-          reply(t.f, { cb: CB, op: 'painted', id });
-          expect(t.w.dataset.revealing).toBeUndefined();
-          // Its timer is gone with it.
-          vi.advanceTimersByTime(REVEAL_MAX_MS);
-          expect(t.w.dataset.revealing).toBeUndefined();
-        });
-
-        it('falls back to REVEAL_MAX_MS when a snippet never says it painted', () => {
-          const t = one();
-          away(t);
-          vi.advanceTimersByTime(CULL_SNAPSHOT_MS);
-          back(t);
-          vi.advanceTimersByTime(REVEAL_MS + 100);
-          expect(t.w.dataset.revealing).toBeDefined();
-          vi.advanceTimersByTime(REVEAL_MAX_MS);
-          expect(t.w.dataset.revealing).toBeUndefined();
-        });
-
-        it('stops when the card leaves again or the frame is destroyed', () => {
-          const t = video();
-          away(t);
-          back(t);
-          expect(t.w.dataset.revealing).toBeDefined();
-          away(t);
-          expect(t.w.dataset.revealing).toBeUndefined();
-          back(t);
-          expect(t.w.dataset.revealing).toBeDefined();
-          t.layer.setOptions({ maxOffscreen: 0 });
-          t.store.remove([...t.store.ids()]);
-          expect(t.w.isConnected).toBe(false);
-          expect(t.w.dataset.revealing).toBeUndefined();
-          expect(() => vi.advanceTimersByTime(REVEAL_MAX_MS)).not.toThrow();
-        });
-
-        it('keeps the veil of a frame that never loaded', () => {
-          const t = make(1, CULL);
-          t.store.add([embed({ ...yt(), w: 480, h: 270 })]);
-          t.tick();
-          const w = wrapperOf(t.frames()[0]);
-          away(t);
-          back(t);
-          expect(w.dataset.revealing).toBeUndefined();
-          expect(w.dataset.ready).toBeUndefined();
-        });
-
-        it('keeps the wrapper transparent between a snippet\'s load and its first paint', () => {
-          const t = make(1, CULL);
-          t.store.add([snippet()]);
-          t.tick();
-          const f = frameOf(0);
-          const post = spy(f);
-          const w = wrapperOf(f);
-          expect(w.dataset.ready).toBeUndefined();
-          expect(w.dataset.revealing).toBeUndefined();
-          load(f);
-          // `ready` turns the wrapper white and the iframe opaque; `revealing` keeps both see-through until painted.
-          expect(w.dataset.ready).toBeDefined();
-          expect(w.dataset.revealing).toBeDefined();
-          const [show] = ops(post, 'show');
-          reply(f, { cb: CB, op: 'painted', id: show.id });
-          expect(w.dataset.revealing).toBeUndefined();
-        });
-
-        it('does the same for a page, for REVEAL_MS after its load', () => {
-          const t = make(1, CULL);
-          t.store.add([embed({ ...yt(), w: 480, h: 270 })]);
-          t.tick();
-          const f = t.frames()[0];
-          load(f);
-          expect(wrapperOf(f).dataset.revealing).toBeDefined();
-          vi.advanceTimersByTime(REVEAL_MS);
-          expect(wrapperOf(f).dataset.revealing).toBeUndefined();
-        });
-
-        it('waits to reveal a frame that loaded while hidden, until its card is back', () => {
-          const t = make(1, CULL);
-          t.store.add([snippet()]);
-          t.tick();
-          const f = frameOf(0);
-          const post = spy(f);
-          away(t);
-          expect(wrapperOf(f).dataset.culled).toBeDefined();
-          load(f);
-          expect(wrapperOf(f).dataset.revealing).toBeUndefined();
-          expect(ops(post, 'show')).toHaveLength(0);
-          back(t);
-          expect(wrapperOf(f).dataset.revealing).toBeDefined();
-          expect(ops(post, 'show')).toHaveLength(1);
-        });
-
-        it('reveals a frozen frame when it thaws, over the snapshot poster', () => {
-          const t = small();
-          reply(t.f, { cb: CB, op: 'snapshot', id: ops(t.post, 'snapshot')[0].id, ok: true, blob: blob() });
-          land();
-          expect(t.w.dataset.frozen).toBeDefined();
-          expect(t.w.dataset.revealing).toBeUndefined();
-          // The card grows past the unfreeze size.
-          t.cam.scale = 1;
-          t.tick();
-          expect(t.w.dataset.frozen).toBeUndefined();
-          expect(t.w.dataset.revealing).toBeDefined();
-          const [show] = ops(t.post, 'show');
-          expect(show).toBeDefined();
-          reply(t.f, { cb: CB, op: 'painted', id: show.id });
-          expect(t.w.dataset.revealing).toBeUndefined();
-        });
-
-        it('reveals a frozen frame whose card left and came back bigger once, when it thaws', () => {
-          const t = small();
-          reply(t.f, { cb: CB, op: 'snapshot', id: ops(t.post, 'snapshot')[0].id, ok: true, blob: blob() });
-          land();
-          t.cam.scale = 1;
-          t.cam.tx = AWAY;
-          t.layer.onFrame(true);
-          // Off screen, a frame is left as it is: it thaws on the way back, in the same frame as it shows.
-          expect(t.w.dataset.culled).toBeDefined();
-          expect(t.w.dataset.revealing).toBeUndefined();
-          t.cam.tx = 0;
-          t.layer.onFrame(true);
-          expect(t.w.dataset.culled).toBeUndefined();
-          expect(t.w.dataset.frozen).toBeUndefined();
-          expect(t.w.dataset.revealing).toBeDefined();
-          expect(ops(t.post, 'show')).toHaveLength(1);
-        });
-
-        it('does not reveal a frozen frame, which stays hidden', () => {
-          const t = small();
-          reply(t.f, { cb: CB, op: 'snapshot', id: ops(t.post, 'snapshot')[0].id, ok: true, blob: blob() });
-          land();
-          expect(t.w.dataset.frozen).toBeDefined();
-          // Still small, so still frozen: the frame behind the poster is hidden whatever the card does.
-          t.cam.tx = AWAY * 10;
-          t.layer.onFrame(true);
-          t.cam.tx = 0;
-          t.layer.onFrame(true);
-          expect(t.w.dataset.frozen).toBeDefined();
-          expect(t.w.dataset.revealing).toBeUndefined();
-        });
-      });
-
       describe('last frame as the poster', () => {
-        it('keeps the frame visible while it is snapshotted, then hides it when the reply is in', () => {
+        it('sends no show and never marks a returning frame as revealing: the transparent wrapper needs neither', () => {
+          const t = one();
+          away(t);
+          vi.advanceTimersByTime(CULL_SNAPSHOT_MS);
+          back(t);
+          expect(t.w.dataset.culled).toBeUndefined();
+          expect(t.w.dataset.revealing).toBeUndefined();
+          expect(ops(t.post, 'show')).toHaveLength(0);
+        });
+
+        describe('while the camera moves fast', () => {
+          // A frame of a pan: 16 ms after the last one, the camera is at `tx`.
+          const pan = (t: { cam: { tx: number }; layer: EmbedLayer }, tx: number, ms = 16) => {
+            vi.advanceTimersByTime(ms);
+            t.cam.tx = tx;
+            t.layer.onFrame(true);
+          };
+
+          it('hides a frame that leaves at once, with no snapshot', () => {
+            const t = one();
+            pan(t, -1000); // 1000 px in 16 ms
+            expect(t.w.dataset.culled).toBeDefined();
+            expect(t.w.dataset.culling).toBeUndefined();
+            expect(asked(t.post)).toHaveLength(0);
+            // The snapshot throttle is untouched: the frame is asked the next time it leaves slowly.
+            pan(t, 0, 2000);
+            pan(t, -870, 2000);
+            pan(t, -890);
+            expect(t.w.dataset.culling).toBeDefined();
+            expect(asked(t.post)).toHaveLength(1);
+          });
+
+          it('snapshots a frame that leaves slowly, even mid-pan', () => {
+            const t = one();
+            pan(t, -870, 2000); // still on screen
+            expect(t.w.dataset.culled).toBeUndefined();
+            pan(t, -890); // 20 px in 16 ms: 1.25 px/ms
+            expect(t.w.dataset.culling).toBeDefined();
+            expect(asked(t.post)).toHaveLength(1);
+          });
+
+          it('counts a zoom as movement', () => {
+            const t = make(1, { ...CULL });
+            t.store.add([snippet(0, { x: 1300 })]);
+            t.tick();
+            const f = frameOf(0);
+            load(f);
+            const post = spy(f);
+            const w = wrapperOf(f);
+            vi.advanceTimersByTime(16);
+            t.cam.scale = 4; // the card is far off to the right now, the point at the centre has not moved
+            t.layer.onFrame(true);
+            expect(w.dataset.culled).toBeDefined();
+            expect(asked(post)).toHaveLength(0);
+          });
+
+          it('keeps the last reading for frames in the same millisecond, and forgets it after a pause in drawing', () => {
+            const t = one();
+            pan(t, -300); // fast
+            t.cam.tx = -1000;
+            t.layer.onFrame(true); // same ms: no new reading, still fast
+            expect(asked(t.post)).toHaveLength(0);
+            expect(t.w.dataset.culled).toBeDefined();
+            // Nothing drawn for a while: the next jump is not measured against a stale camera.
+            pan(t, 0, 1000);
+            pan(t, -1200, 1000);
+            expect(t.w.dataset.culling).toBeDefined();
+          });
+        });
+
+        it('draws the picture of a cull snapshot when the browser is idle, not in the frame that took the reply', async () => {
+          const idle: Array<() => void> = [];
+          const win = document.defaultView as unknown as { requestIdleCallback?: unknown };
+          win.requestIdleCallback = (cb: () => void) => idle.push(cb);
+          try {
+            const rasterize = vi.fn(async () => blob());
+            const t = one({}, { rasterize });
+            away(t);
+            reply(t.f, { cb: CB, op: 'snapshot', id: asked(t.post)[0].id, ok: true, svg: SVG });
+            expect(t.w.dataset.culled).toBeDefined();
+            await vi.advanceTimersByTimeAsync(5000);
+            expect(rasterize).not.toHaveBeenCalled();
+            expect(idle).toHaveLength(1);
+            idle[0]();
+            await vi.advanceTimersByTimeAsync(0);
+            expect(rasterize).toHaveBeenCalledTimes(1);
+            expect(posterOf(t.store, t.el.id)).toBe('blob:snap-0');
+          } finally {
+            delete win.requestIdleCallback;
+          }
+        });
+
+        it('does not draw when the frame went away before the browser was idle', async () => {
+          const idle: Array<() => void> = [];
+          const win = document.defaultView as unknown as { requestIdleCallback?: unknown };
+          win.requestIdleCallback = (cb: () => void) => idle.push(cb);
+          try {
+            const rasterize = vi.fn(async () => blob());
+            const t = one({ maxOffscreen: 0 }, { rasterize });
+            away(t);
+            reply(t.f, { cb: CB, op: 'snapshot', id: asked(t.post)[0].id, ok: true, svg: SVG });
+            t.layer.onSettle();
+            expect(t.layer.live.has(t.el.id)).toBe(false);
+            idle[0]();
+            await vi.advanceTimersByTimeAsync(0);
+            expect(rasterize).not.toHaveBeenCalled();
+          } finally {
+            delete win.requestIdleCallback;
+          }
+        });
+
+        it('keeps the frame visible while it is snapshotted, then hides it when the reply is in', async () => {
           const t = one();
           away(t);
           expect(t.layer.culled.has(t.el.id)).toBe(true);
@@ -1448,31 +1644,33 @@ describe('EmbedLayer', () => {
           expect(req.vw).toBeGreaterThan(0);
           expect(req.vh).toBeGreaterThan(0);
           expect(req.w / req.h).toBeCloseTo(480 / 300, 1);
-          reply(t.f, { cb: CB, op: 'snapshot', id: req.id, ok: true, blob: blob() });
+          await answer(t.f, req.id);
           expect(t.w.dataset.culling).toBeUndefined();
           expect(t.w.dataset.culled).toBeDefined();
           // The poster is the last frame, and the frame is not frozen.
-          expect(t.store.get(t.el.id)?.media.src).toBe('blob:snap-0');
+          expect(posterOf(t.store, t.el.id)).toBe('blob:snap-0');
           expect(t.layer.frozen.size).toBe(0);
           expect(t.w.dataset.frozen).toBeUndefined();
           expect(t.layer.live.has(t.el.id)).toBe(true);
         });
 
         it('hides the frame as soon as the markup is in, and sets the poster once it is drawn', async () => {
-          const rasterize = vi.fn(async () => blob());
+          const rasterize = vi.fn(async () => new Blob(['img'], { type: 'image/webp' }));
           const t = one({}, { rasterize });
           away(t);
           const [req] = asked(t.post);
           reply(t.f, { cb: CB, op: 'snapshot', id: req.id, ok: true, svg: '<svg><foreignObject/></svg>' });
-          expect(rasterize).toHaveBeenCalledWith('<svg><foreignObject/></svg>', req.w, req.h);
           expect(t.w.dataset.culled).toBeDefined();
-          expect(t.store.get(t.el.id)?.media.src).toBeUndefined();
+          // The drawing waits for the browser to be idle: not in the frame that took the reply.
+          expect(rasterize).not.toHaveBeenCalled();
+          expect(posterOf(t.store, t.el.id)).toBeUndefined();
           await vi.advanceTimersByTimeAsync(0);
-          expect(t.store.get(t.el.id)?.media.src).toBe('blob:snap-0');
+          expect(rasterize).toHaveBeenCalledWith('<svg><foreignObject/></svg>', req.w, req.h);
+          expect(posterOf(t.store, t.el.id)).toBe('blob:snap-0');
           expect(t.layer.frozen.size).toBe(0);
         });
 
-        it('hides the frame after CULL_SNAPSHOT_MS when it does not answer', () => {
+        it('hides the frame after CULL_SNAPSHOT_MS when it does not answer', async () => {
           const t = one();
           away(t);
           vi.advanceTimersByTime(CULL_SNAPSHOT_MS - 1);
@@ -1481,8 +1679,8 @@ describe('EmbedLayer', () => {
           expect(t.w.dataset.culled).toBeDefined();
           expect(t.w.dataset.culling).toBeUndefined();
           // A late answer still gives the poster.
-          reply(t.f, { cb: CB, op: 'snapshot', id: asked(t.post)[0].id, ok: true, blob: blob() });
-          expect(t.store.get(t.el.id)?.media.src).toBe('blob:snap-0');
+          await answer(t.f, asked(t.post)[0].id);
+          expect(posterOf(t.store, t.el.id)).toBe('blob:snap-0');
         });
 
         it('hides the frame at once when the snapshot fails, and does not retry or block freezing', () => {
@@ -1490,33 +1688,31 @@ describe('EmbedLayer', () => {
           away(t);
           reply(t.f, { cb: CB, op: 'snapshot', id: asked(t.post)[0].id, ok: false });
           expect(t.w.dataset.culled).toBeDefined();
-          expect(t.store.get(t.el.id)?.media.src).toBeUndefined();
+          expect(posterOf(t.store, t.el.id)).toBeUndefined();
           vi.advanceTimersByTime(10000);
           expect(asked(t.post)).toHaveLength(1);
         });
 
-        it('cancels the pending cull when the card returns first, and ignores the late reply', () => {
+        it('cancels the pending cull when the card returns first, and ignores the late reply', async () => {
           const t = one();
           away(t);
           const [req] = asked(t.post);
           back(t);
           expect(t.w.dataset.culling).toBeUndefined();
           expect(t.w.dataset.culled).toBeUndefined();
-          // Never hidden, so nothing to reveal.
-          expect(t.w.dataset.revealing).toBeUndefined();
-          reply(t.f, { cb: CB, op: 'snapshot', id: req.id, ok: true, blob: blob() });
+          await answer(t.f, req.id);
           vi.advanceTimersByTime(CULL_SNAPSHOT_MS * 2);
           expect(t.w.dataset.culled).toBeUndefined();
-          expect(t.store.get(t.el.id)?.media.src).toBeUndefined();
+          expect(posterOf(t.store, t.el.id)).toBeUndefined();
           // It did not use up the throttle: the next time it leaves it is asked again.
           away(t);
           expect(asked(t.post)).toHaveLength(2);
         });
 
-        it('does not snapshot a frame again within CULL_SNAPSHOT_MIN_MS', () => {
+        it('does not snapshot a frame again within CULL_SNAPSHOT_MIN_MS', async () => {
           const t = one();
           away(t);
-          reply(t.f, { cb: CB, op: 'snapshot', id: asked(t.post)[0].id, ok: true, blob: blob() });
+          await answer(t.f, asked(t.post)[0].id);
           back(t);
           vi.advanceTimersByTime(1000);
           away(t);
@@ -1531,14 +1727,14 @@ describe('EmbedLayer', () => {
           expect(asked(t.post)).toHaveLength(2);
         });
 
-        it('hides at once what has nothing to snapshot: a page, a frozen frame, a frame that never loaded', () => {
+        it('hides at once what has nothing to snapshot: a page, a frozen frame, a frame that never loaded', async () => {
           const v = video();
           away(v);
           expect(v.w.dataset.culled).toBeDefined();
           expect(v.w.dataset.culling).toBeUndefined();
 
           const fz = small();
-          reply(fz.f, { cb: CB, op: 'snapshot', id: ops(fz.post, 'snapshot')[0].id, ok: true, blob: blob() });
+          await answer(fz.f, ops(fz.post, 'snapshot')[0].id);
           land();
           expect(fz.w.dataset.frozen).toBeDefined();
           fz.cam.tx = AWAY;
@@ -1831,28 +2027,31 @@ describe('EmbedLayer', () => {
         },
       };
     }
-    function build(opts: object = {}, scale = 1) {
+    function build(opts: object = {}, scale = 1, burst: object = { burstWindows: Infinity, agreeWindows: Infinity }) {
       const clock = fakeRaf();
       const store = new Store();
       const { stage, cam } = fakeStage(store, scale);
+      // Bursts are the monitor's own tests; here every window counts, so a test can walk the budget with them.
+      const monitor = new FrameRateMonitor({ raf: clock.raf, caf: clock.caf, heartbeatMs: Infinity, ...burst });
       const layer = new EmbedLayer(
-        { root, host, store, stage, emit: () => {}, raf: clock.raf, caf: clock.caf },
+        { root, host, store, stage, emit: () => {}, frameRate: monitor, rasterize: async () => new Blob(['img']) },
         { ...ALL, ...opts },
       );
+      made.push(layer);
       const tick = () => {
         layer.onFrame(false);
         layer.onSettle();
       };
-      return { store, layer, cam, clock, tick };
+      return { store, layer, cam, clock, tick, monitor };
     }
     const snippet = (i: number, init: Partial<ElementInit> = {}) =>
       embed({ media: { embed: { html: `<i>${i}</i>` } }, w: 480, h: 300, x: i * 500, ...init });
     const frameOf = (i: number) =>
       [...root.querySelectorAll<HTMLIFrameElement>('.cb-embed iframe')].find((f) => f.getAttribute('srcdoc')?.includes(`<i>${i}</i>`)) as HTMLIFrameElement;
-    const load = (f: HTMLIFrameElement) => f.dispatchEvent(new Event('load'));
+    const load = (f: HTMLIFrameElement) => f.dispatchEvent(loadEvent());
     const spy = (f: HTMLIFrameElement) => vi.spyOn(f.contentWindow as Window, 'postMessage').mockImplementation(() => {});
-    // What a frame was sent, without the `show` that goes out when it first paints.
-    const sentTo = (p: ReturnType<typeof spy>) => p.mock.calls.filter(([m]) => (m as { op?: string })?.op !== 'show');
+    // What a frame was sent.
+    const sentTo = (p: ReturnType<typeof spy>) => p.mock.calls;
     const ops = (p: ReturnType<typeof spy>, op: string) => p.mock.calls.filter(([m]) => (m as { op?: string })?.op === op).length;
     const ids = (els: { id: string }[]) => new Set(els.map((e) => e.id));
 
@@ -2027,8 +2226,8 @@ describe('EmbedLayer', () => {
 
     describe('adaptive sampler', () => {
       // 20 snippets in view at 0.2x: all mounted, all animating.
-      const many = (opts: object = {}) => {
-        const t = build(opts, 0.2);
+      const many = (opts: object = {}, scale = 0.2, burst?: object) => {
+        const t = build(opts, scale, burst);
         const els = Array.from({ length: 20 }, (_, i) => snippet(i, { x: (i % 5) * 500, y: Math.floor(i / 5) * 320 }));
         t.store.add(els);
         t.tick();
@@ -2037,7 +2236,7 @@ describe('EmbedLayer', () => {
         const posts = fs.map(spy);
         const paused = () => posts.reduce((n, p) => n + ops(p, 'pause'), 0);
         const resumed = () => posts.reduce((n, p) => n + ops(p, 'resume'), 0);
-        return { ...t, els, paused, resumed };
+        return { ...t, els, posts, paused, resumed };
       };
 
       it('starts when a visible frame renders, and ignores the first window', () => {
@@ -2132,6 +2331,176 @@ describe('EmbedLayer', () => {
         expect(t.layer.animating.size).toBe(8);
       });
 
+      describe('freeze size', () => {
+        // 20 snippets 480 x 300 at 0.5x: 150 px on the short side, over freezePx (140) and under 1.5x it.
+        const frozen20 = (opts: object = {}) => {
+          const t = many({ freezePx: 140, ...opts }, 0.5);
+          t.clock.first(100);
+          t.clock.win(100); // ignored
+          const reqs = (p: ReturnType<typeof spy>) =>
+            p.mock.calls.map(([m]) => m as { op?: string; id: number; h: number }).filter((m) => m.op === 'snapshot');
+          const snaps = () => t.posts.reduce((n, p) => n + reqs(p).length, 0);
+          return { ...t, snaps, reqs };
+        };
+        const slow = (t: ReturnType<typeof frozen20>, n: number) => {
+          const seen: number[] = [];
+          for (let i = 0; i < n; i++) {
+            t.clock.win(100);
+            seen.push(t.layer.freezeThreshold);
+          }
+          return seen;
+        };
+
+        it('starts at freezePx and leaves it alone until the budget is at its floor', () => {
+          const t = frozen20();
+          expect(t.layer.freezeThreshold).toBe(140);
+          // Budgets 14, 9, 6: the window that reaches the floor does not raise it yet.
+          expect(slow(t, 3)).toEqual([140, 140, 140]);
+          expect(t.layer.animatingBudget).toBe(6);
+          expect(t.snaps()).toBe(0);
+        });
+
+        it('multiplies by 1.5 per slow window at the floor, up to 4x, and freezes what is then small', () => {
+          const t = frozen20();
+          slow(t, 3);
+          expect(slow(t, 5)).toEqual([210, 315, 472.5, 560, 560]);
+          t.tick();
+          // 150 px cards are small now: asked for a snapshot, at the size they reach before they thaw.
+          expect(t.snaps()).toBeGreaterThan(0);
+          // Sharp up to where they thaw: 1.4 x 560 px on the short side (device px, dpr 1), 640 on the long one.
+          const [req] = t.posts.flatMap((p) => t.reqs(p));
+          expect(req.h).toBe(400);
+        });
+
+        it('lowers it by 1.5 per pair of smooth windows, down to freezePx', () => {
+          const t = frozen20();
+          slow(t, 6); // 140 -> 210 -> 315 -> 472.5
+          expect(t.layer.freezeThreshold).toBe(472.5);
+          const down: number[] = [];
+          for (let i = 0; i < 8; i++) {
+            t.clock.win(16);
+            down.push(t.layer.freezeThreshold);
+          }
+          expect(down).toEqual([472.5, 315, 315, 210, 210, 140, 140, 140]);
+        });
+
+        it('does not count a window in between as smooth, and a slow one starts the pair over', () => {
+          const t = frozen20();
+          slow(t, 4); // 210
+          t.clock.win(16);
+          t.clock.win(22); // ~45 fps
+          t.clock.win(16);
+          expect(t.layer.freezeThreshold).toBe(210);
+          t.clock.win(16);
+          expect(t.layer.freezeThreshold).toBe(140);
+        });
+
+        it('never moves with freezePx 0, and goes back to freezePx when adaptive is turned off', () => {
+          const off = frozen20({ freezePx: 0 });
+          slow(off, 6);
+          expect(off.layer.freezeThreshold).toBe(0);
+          const t = frozen20();
+          slow(t, 5);
+          expect(t.layer.freezeThreshold).toBeGreaterThan(140);
+          t.layer.setOptions({ adaptive: false });
+          expect(t.layer.freezeThreshold).toBe(140);
+        });
+
+        it('thaws what is no longer small once it is lowered, with the usual hysteresis', async () => {
+          const t = frozen20();
+          slow(t, 4); // 210: the 150 px cards are small
+          t.tick();
+          // The six that were asked (MAX_SNAPSHOTS) are small now; one of them answers.
+          const i = t.posts.findIndex((p) => t.reqs(p).length > 0);
+          expect(i).toBeGreaterThanOrEqual(0);
+          const f = frameOf(i);
+          const [first] = t.reqs(t.posts[i]);
+          window.dispatchEvent(new MessageEvent('message', { data: { cb: CB, op: 'snapshot', id: first.id, ok: true, svg: '<svg/>' }, source: f.contentWindow as Window }));
+          await new Promise((r) => setTimeout(r, 300));
+          expect(t.layer.frozen.has(t.els[i].id)).toBe(true);
+          for (let i = 0; i < 4; i++) t.clock.win(16);
+          t.tick();
+          // 150 px is under 1.4 x 140 = 196: still frozen. Only a bigger card thaws.
+          expect(t.layer.freezeThreshold).toBe(140);
+          expect(t.layer.frozen.has(t.els[i].id)).toBe(true);
+          t.cam.scale = 0.7;
+          t.layer.onFrame(true);
+          expect(t.layer.frozen.has(t.els[i].id)).toBe(false);
+        });
+      });
+
+      describe('in bursts', () => {
+        const bursts = { burstWindows: 4, agreeWindows: 2 };
+
+        it('stops measuring once the readings agree, so the page can idle', () => {
+          const t = many({}, 0.2, bursts);
+          expect(t.clock.running()).toBe(true);
+          t.clock.first(16);
+          t.clock.win(16); // dropped
+          t.clock.win(16);
+          t.clock.win(16);
+          expect(t.layer.animatingBudget).toBe(Infinity);
+          expect(t.clock.running()).toBe(false);
+        });
+
+        it('keeps going while its own budget changes, and stops when the floor is reached', () => {
+          const t = many({}, 0.2, bursts);
+          t.clock.first(100);
+          t.clock.win(100); // dropped
+          const seen: number[] = [];
+          for (let i = 0; i < 6 && t.clock.running(); i++) {
+            t.clock.win(100);
+            seen.push(t.layer.animatingBudget);
+          }
+          // Each window lowered the budget, which asked for another one; the last two agree at the floor.
+          expect(seen).toEqual([14, 9, 6, 6, 6]);
+          expect(t.clock.running()).toBe(false);
+          expect(t.paused()).toBe(14);
+        });
+
+        it('measures again when frames are mounted or destroyed', () => {
+          const t = many({}, 0.2, bursts);
+          t.clock.first(16);
+          t.clock.win(16);
+          t.clock.win(16);
+          t.clock.win(16);
+          expect(t.clock.running()).toBe(false);
+          t.store.remove([t.els[0].id]);
+          t.tick();
+          expect(t.clock.running()).toBe(true);
+        });
+
+        it('measures again when the camera settles with frames still rendering, not when nothing renders', () => {
+          const t = many({}, 0.2, bursts);
+          t.clock.first(16);
+          t.clock.win(16);
+          t.clock.win(16);
+          t.clock.win(16);
+          expect(t.clock.running()).toBe(false);
+          // The board pokes its monitor on a settled camera.
+          t.monitor.poke();
+          expect(t.clock.running()).toBe(true);
+          t.cam.tx = -1600 * 20;
+          t.layer.onFrame(true);
+          t.layer.onSettle();
+          expect(t.layer.culled.size).toBe(20);
+          expect(t.clock.running()).toBe(false);
+          t.monitor.poke();
+          expect(t.clock.running()).toBe(false);
+        });
+
+        it('measures again when the budget ceiling or the switch is changed by the host', () => {
+          const t = many({}, 0.2, bursts);
+          t.clock.first(16);
+          t.clock.win(16);
+          t.clock.win(16);
+          t.clock.win(16);
+          expect(t.clock.running()).toBe(false);
+          t.layer.setOptions({ maxAnimating: 10 });
+          expect(t.clock.running()).toBe(true);
+        });
+      });
+
       it('adaptive: false restores the ceiling and stops the sampler', () => {
         const t = many({ maxAnimating: 12 });
         t.clock.first(100);
@@ -2205,6 +2574,418 @@ describe('EmbedLayer', () => {
         t.layer.dispose();
         expect(t.clock.running()).toBe(false);
         expect(t.clock.caf).toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('snippet previews', () => {
+    const CB = 'corkboard-embed';
+    const NONE = { maxLive: 0, maxMounted: 0 };
+    let made = 0;
+    const revoked: string[] = [];
+    const realCreate = URL.createObjectURL;
+    const realRevoke = URL.revokeObjectURL;
+    beforeEach(() => {
+      vi.useFakeTimers();
+      made = 0;
+      revoked.length = 0;
+      URL.createObjectURL = () => `blob:pv-${made++}`;
+      URL.revokeObjectURL = (u: string) => void revoked.push(u);
+    });
+    afterEach(() => {
+      URL.createObjectURL = realCreate;
+      URL.revokeObjectURL = realRevoke;
+    });
+
+    const snip = (i: number, init: Partial<ElementInit> = {}) =>
+      embed({ media: { embed: { html: `<i>${i}</i>` } }, w: 480, h: 300, x: i * 500, ...init });
+    const studios = () => [...document.querySelectorAll<HTMLIFrameElement>('body > div[aria-hidden="true"] > iframe')];
+    const studioOf = (i: number) => studios().find((f) => f.getAttribute('srcdoc')?.includes(`<i>${i}</i>`));
+    const img = () => new Blob(['img'], { type: 'image/webp' });
+    type Req = { id: number; w: number; h: number; vw: number; vh: number; op: string };
+    // The frame loads; after the settle time it is asked for its snapshot.
+    const ask = (f: HTMLIFrameElement) => {
+      const post = vi.spyOn(f.contentWindow as Window, 'postMessage').mockImplementation(() => {});
+      f.dispatchEvent(loadEvent());
+      vi.advanceTimersByTime(PREVIEW_SETTLE_MS);
+      const reqs = post.mock.calls.map((c) => c[0] as Req).filter((m) => m.op === 'snapshot');
+      return { post, req: reqs.at(-1), count: reqs.length };
+    };
+    const reply = (f: HTMLIFrameElement, data: unknown) =>
+      window.dispatchEvent(new MessageEvent('message', { data, source: f.contentWindow as Window }));
+    // Loaded, asked, answered with markup, drawn.
+    const render = async (f: HTMLIFrameElement) => {
+      const { req } = ask(f);
+      reply(f, { cb: CB, op: 'snapshot', id: req!.id, ok: true, svg: '<svg/>' });
+      await vi.advanceTimersByTimeAsync(0);
+      return req!;
+    };
+    const setup = (opts: object = {}, deps: Partial<EmbedLayerDeps> = {}, cards: ElementInit[] = []) => {
+      const rasterize = vi.fn(async () => img());
+      const t = make(1, { ...NONE, ...opts }, 4, { rasterize, ...deps });
+      const els = cards.map((c) => c as ReturnType<typeof snip>);
+      t.store.add(els);
+      t.tick();
+      return { ...t, rasterize, els };
+    };
+    const srcOf = (t: ReturnType<typeof setup>, i: number) => posterOf(t.store, t.els[i].id);
+
+    it('queues the snippet cards that are not live and have no picture of the host\'s, and nothing else', () => {
+      const t = setup({ maxLive: 1, maxMounted: 1, previewWorkers: 2 }, {}, [
+        snip(0),
+        snip(1),
+        snip(2),
+        snip(3),
+        snip(4, { media: { src: 'https://cdn.example/p.jpg', embed: { html: '<i>4</i>' } } }),
+        embed(yt(5)),
+      ]);
+      expect(t.layer.live.size).toBe(1);
+      // 3 snippets are not live: two in studios, one waiting. The host's picture and the video are left alone.
+      expect(t.layer.previewsPending).toBe(3);
+      expect(studios()).toHaveLength(2);
+      expect(studioOf(4)).toBeUndefined();
+      expect(studios().some((f) => f.getAttribute('srcdoc')?.includes('youtu'))).toBe(false);
+      const live = [...t.layer.live][0];
+      expect(studios().some((f) => f.getAttribute('srcdoc') === t.frames()[0].getAttribute('srcdoc'))).toBe(false);
+      expect(live).toBeDefined();
+    });
+
+    it('renders in a hidden, inert, same-sandbox frame that takes no loading slot', () => {
+      const t = setup({ previewWorkers: 1, maxLoading: 1 }, {}, [snip(0)]);
+      const f = studios()[0];
+      const box = f.parentElement as HTMLElement;
+      expect(box.parentElement).toBe(document.body);
+      expect(box.style.position).toBe('fixed');
+      expect(box.style.opacity).toBe('0');
+      expect(box.style.pointerEvents).toBe('none');
+      expect(box.style.left).toBe('0px');
+      expect(box.hasAttribute('inert')).toBe(true);
+      expect(box.getAttribute('aria-hidden')).toBe('true');
+      expect(f.tabIndex).toBe(-1);
+      expect(f.getAttribute('sandbox')).toBe('allow-scripts');
+      expect(f.getAttribute('srcdoc')).toContain('Content-Security-Policy');
+      // Laid out like a live frame: the 720p virtual screen at the card's aspect (0.62 after bucketing).
+      expect(f.style.height).toBe('720px');
+      expect(parseFloat(f.style.width) / 720).toBeCloseTo(1000 / 620, 2);
+      expect(t.layer.loading.size).toBe(0);
+    });
+
+    it('draws the nearest card to the centre of the view first, on screen before off screen', async () => {
+      const t = setup({ previewWorkers: 1 }, {}, [
+        snip(0, { x: 3000, y: 0 }),
+        snip(1, { x: 0, y: 0 }),
+        snip(2, { x: 560, y: 350 }),
+        snip(3, { x: 4000, y: 0 }),
+      ]);
+      const order: number[] = [];
+      for (let n = 0; n < 4; n++) {
+        const f = studios()[0];
+        order.push(Number(/<i>(\d)<\/i>/.exec(f.getAttribute('srcdoc')!)![1]));
+        await render(f);
+      }
+      expect(order).toEqual([2, 1, 0, 3]);
+      expect(t.layer.previewsPending).toBe(0);
+      expect(studios()).toHaveLength(0);
+    });
+
+    it('re-ranks on settle: the new view first', async () => {
+      const t = setup({ previewWorkers: 1 }, {}, [snip(0, { x: 0, y: 0 }), snip(1, { x: 3000, y: 0 }), snip(2, { x: 3200, y: 0 })]);
+      await render(studios()[0]);
+      // The camera moved to the right while the first was drawn; the next job is the one now in view.
+      t.layer.onFrame(true);
+      t.cam.tx = -3000;
+      t.layer.onSettle();
+      expect(/<i>(\d)<\/i>/.exec(studios()[0].getAttribute('srcdoc')!)![1]).toBe('1');
+    });
+
+    it('asks for the snapshot only after the settle time, with the layout size, and draws it at the frozen size', async () => {
+      const t = setup({ previewWorkers: 1 }, {}, [snip(0)]);
+      const f = studios()[0];
+      const post = vi.spyOn(f.contentWindow as Window, 'postMessage').mockImplementation(() => {});
+      f.dispatchEvent(loadEvent());
+      vi.advanceTimersByTime(PREVIEW_SETTLE_MS - 1);
+      expect(post).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      const [msg, target] = post.mock.calls[0] as [Req, string];
+      expect(target).toBe('*');
+      expect(msg).toMatchObject({ cb: CB, op: 'snapshot', vh: 720 });
+      expect(msg.vw / msg.vh).toBeCloseTo(1000 / 620, 2);
+      // As sharp as a frozen snapshot: 1.4 x freezePx on the short side, 640 px at most on the long one.
+      expect(msg.h).toBe(196);
+      expect(msg.w / msg.h).toBeCloseTo(1000 / 620, 1);
+      reply(f, { cb: CB, op: 'snapshot', id: msg.id, ok: true, svg: '<svg><foreignObject/></svg>' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.rasterize).toHaveBeenCalledWith('<svg><foreignObject/></svg>', msg.w, msg.h);
+    });
+
+    it('ignores replies that are not for the job: another source, another id, another cb', async () => {
+      const t = setup({ previewWorkers: 1 }, {}, [snip(0)]);
+      const f = studios()[0];
+      const { req } = ask(f);
+      const stranger = document.createElement('iframe');
+      document.body.appendChild(stranger);
+      window.dispatchEvent(new MessageEvent('message', { data: { cb: CB, op: 'snapshot', id: req!.id, ok: true, svg: '<svg/>' }, source: stranger.contentWindow as Window }));
+      reply(f, { cb: CB, op: 'snapshot', id: req!.id + 1, ok: true, svg: '<svg/>' });
+      reply(f, { cb: 'other', op: 'snapshot', id: req!.id, ok: true, svg: '<svg/>' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.rasterize).not.toHaveBeenCalled();
+      stranger.remove();
+    });
+
+    it('makes the picture the poster, and a late tile, a theme change or a retitle never cover it', async () => {
+      let tile: (b: Blob) => void = () => {};
+      drawTile.mockImplementation(() => new Promise<Blob | null>((r) => (tile = r)));
+      const t = setup({ previewWorkers: 1 }, {}, [snip(0)]);
+      await render(studios()[0]);
+      expect(srcOf(t, 0)).toBe('blob:pv-0');
+      // The tile arrives after the picture.
+      tile(new Blob(['tile']));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(srcOf(t, 0)).toBe('blob:pv-0');
+      expect(revoked).toContain('blob:pv-1');
+      drawTile.mockClear();
+      t.layer.setTheme();
+      const media = t.store.get(t.els[0].id)!.media;
+      t.store.update(t.els[0].id, { media: { ...media, embed: { ...media.embed!, title: 'New' } } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(drawTile).not.toHaveBeenCalled();
+      expect(srcOf(t, 0)).toBe('blob:pv-0');
+      expect(t.layer.previewsPending).toBe(0);
+    });
+
+    it('lets the snapshot of a live frame replace the preview, but not the other way round', async () => {
+      const t = setup({ previewWorkers: 1 }, {}, [snip(0)]);
+      await render(studios()[0]);
+      expect(srcOf(t, 0)).toBe('blob:pv-0');
+      t.layer.setOptions({ maxLive: Infinity, maxMounted: Infinity, maxLoading: Infinity });
+      t.tick();
+      const live = t.frames()[0];
+      live.dispatchEvent(loadEvent());
+      const post = vi.spyOn(live.contentWindow as Window, 'postMessage').mockImplementation(() => {});
+      t.cam.scale = 0.2;
+      t.tick();
+      const [req] = post.mock.calls.map((c) => c[0] as Req).filter((m) => m.op === 'snapshot');
+      reply(live, { cb: CB, op: 'snapshot', id: req.id, ok: true, svg: '<svg/>' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(srcOf(t, 0)).toBe('blob:pv-1');
+      // No new preview for a card that has a real picture.
+      expect(t.layer.previewsPending).toBe(0);
+    });
+
+    it('draws a snippet that two cards share once', async () => {
+      const t = setup({ previewWorkers: 1 }, {}, [snip(0), snip(0, { x: 600 })]);
+      await render(studios()[0]);
+      expect(t.rasterize).toHaveBeenCalledTimes(1);
+      // The second card took the first one's picture without loading anything.
+      expect(srcOf(t, 0)).toBeDefined();
+      expect(srcOf(t, 1)).toBeDefined();
+      expect(studios()).toHaveLength(0);
+      expect(t.layer.previewsPending).toBe(0);
+    });
+
+    it('keeps the tile of a snippet that fails, and tries it once more, after the others', async () => {
+      drawTile.mockResolvedValue(new Blob(['tile']));
+      const t = setup({ previewWorkers: 1 }, {}, [snip(0, { x: 560, y: 350 }), snip(1, { x: 0, y: 0 })]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(srcOf(t, 0)).toBe('blob:pv-0');
+      const f = studios()[0];
+      expect(f.getAttribute('srcdoc')).toContain('<i>0</i>');
+      const { req } = ask(f);
+      reply(f, { cb: CB, op: 'snapshot', id: req!.id, ok: false });
+      await vi.advanceTimersByTimeAsync(0);
+      // The other card goes first now.
+      expect(studios()[0].getAttribute('srcdoc')).toContain('<i>1</i>');
+      await render(studios()[0]);
+      expect(studios()[0].getAttribute('srcdoc')).toContain('<i>0</i>');
+      const second = ask(studios()[0]);
+      reply(studios()[0], { cb: CB, op: 'snapshot', id: second.req!.id, ok: false });
+      await vi.advanceTimersByTimeAsync(0);
+      // Twice is all: the tile stays, nothing is pending, no frame is left.
+      expect(studios()).toHaveLength(0);
+      expect(t.layer.previewsPending).toBe(0);
+      expect(srcOf(t, 0)).toBe('blob:pv-0');
+      vi.advanceTimersByTime(60000);
+      expect(studios()).toHaveLength(0);
+    });
+
+    it('gives up on a frame that never loads after the time box, and on a blank drawing', async () => {
+      const t = setup({ previewWorkers: 1 }, { rasterize: vi.fn(async () => null) }, [snip(0), snip(1, { x: 3000 })]);
+      expect(studios()).toHaveLength(1);
+      vi.advanceTimersByTime(PREVIEW_JOB_MS);
+      // Next card (the failed one goes last).
+      expect(studios()[0].getAttribute('srcdoc')).toContain('<i>1</i>');
+      await render(studios()[0]);
+      // Both have failed once; the nearer goes first.
+      expect(t.layer.previewsPending).toBe(2);
+      expect(studios()[0].getAttribute('srcdoc')).toContain('<i>0</i>');
+      vi.advanceTimersByTime(PREVIEW_JOB_MS);
+      expect(studios()[0].getAttribute('srcdoc')).toContain('<i>1</i>');
+      vi.advanceTimersByTime(PREVIEW_JOB_MS);
+      expect(studios()).toHaveLength(0);
+      expect(t.layer.previewsPending).toBe(0);
+    });
+
+    it('holds the queue while the camera moves, and goes on when it settles', async () => {
+      const t = make(1, { ...NONE, previewWorkers: 1 }, 4, { rasterize: async () => img() });
+      t.store.add([snip(0), snip(1, { x: 600 })]);
+      t.layer.onFrame(true);
+      expect(studios()).toHaveLength(0);
+      expect(t.layer.previewsPending).toBe(0);
+      t.layer.onSettle();
+      expect(studios()).toHaveLength(1);
+      // Moving again: the running job finishes, the next one does not start.
+      t.layer.onFrame(true);
+      await render(studios()[0]);
+      expect(studios()).toHaveLength(0);
+      expect(t.layer.previewsPending).toBe(1);
+      t.layer.onSettle();
+      expect(studios()).toHaveLength(1);
+    });
+
+    it('does nothing with previewWorkers 0, and stops when it is set to 0', () => {
+      const off = setup({ previewWorkers: 0 }, {}, [snip(0)]);
+      expect(studios()).toHaveLength(0);
+      expect(off.layer.previewsPending).toBe(0);
+      off.layer.dispose();
+      const t = setup({ previewWorkers: 2 }, {}, [snip(0), snip(1), snip(2)]);
+      expect(studios()).toHaveLength(2);
+      expect(t.layer.previewsPending).toBe(3);
+      t.layer.setOptions({ previewWorkers: 0 });
+      expect(studios()).toHaveLength(0);
+      expect(t.layer.previewsPending).toBe(0);
+      t.tick();
+      expect(studios()).toHaveLength(0);
+    });
+
+    it('queues a card again when its live frame is destroyed before it got a picture', () => {
+      const t = setup({ maxLive: 1, maxMounted: 1, previewWorkers: 1 }, {}, [snip(0), snip(1, { x: 600 })]);
+      expect(t.layer.live.size).toBe(1);
+      const liveId = [...t.layer.live][0];
+      const other = t.els.find((e) => e.id !== liveId)!;
+      expect(studios()[0].getAttribute('srcdoc')).toContain(String(other.media.embed!.html));
+      // The live card moves out of the budget: its frame goes, and it is a candidate again.
+      t.layer.setOptions({ maxMounted: 0, maxLive: 0 });
+      t.tick();
+      expect(t.layer.live.size).toBe(0);
+      expect(t.layer.previewsPending).toBe(2);
+    });
+
+    it('removes its frames and timers on dispose', () => {
+      const t = setup({ previewWorkers: 2 }, {}, [snip(0), snip(1), snip(2)]);
+      ask(studios()[0]);
+      expect(studios()).toHaveLength(2);
+      t.layer.dispose();
+      expect(studios()).toHaveLength(0);
+      expect(document.querySelectorAll('body > div[aria-hidden="true"]')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('gives each job a frame of its own, and does not take a late load of the last job\'s document for the next one\'s', () => {
+      const t = setup({ previewWorkers: 1 }, {}, [snip(0, { x: 560, y: 350 }), snip(1)]);
+      const first = studios()[0];
+      expect(first.getAttribute('srcdoc')).toContain('<i>0</i>');
+      // The first never loads in time; the next job takes the studio.
+      vi.advanceTimersByTime(PREVIEW_JOB_MS);
+      const second = studios()[0];
+      expect(second).not.toBe(first);
+      expect(second.getAttribute('srcdoc')).toContain('<i>1</i>');
+      expect(first.isConnected).toBe(false);
+      const post = vi.spyOn(second.contentWindow as Window, 'postMessage').mockImplementation(() => {});
+      // The load of the first document turns up now.
+      first.dispatchEvent(loadEvent());
+      vi.advanceTimersByTime(PREVIEW_SETTLE_MS * 2);
+      expect(post).not.toHaveBeenCalled();
+      // The second's own load is the one that counts, once.
+      second.dispatchEvent(loadEvent());
+      second.dispatchEvent(loadEvent());
+      vi.advanceTimersByTime(PREVIEW_SETTLE_MS);
+      expect(post.mock.calls.filter(([m]) => (m as { op?: string }).op === 'snapshot')).toHaveLength(1);
+      expect(t.layer.previewsPending).toBe(2);
+    });
+
+    it('ignores a reply from the frame of a job that ended', async () => {
+      const t = setup({ previewWorkers: 1 }, {}, [snip(0, { x: 560, y: 350 }), snip(1)]);
+      const first = studios()[0];
+      const { req } = ask(first);
+      vi.advanceTimersByTime(PREVIEW_JOB_MS);
+      expect(studios()[0]).not.toBe(first);
+      reply(first, { cb: CB, op: 'snapshot', id: req!.id, ok: true, svg: '<svg/>' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.rasterize).not.toHaveBeenCalled();
+    });
+
+    it('a card removed mid-job frees its frame for the next one', () => {
+      const t = setup({ previewWorkers: 1 }, {}, [snip(0, { x: 560, y: 350 }), snip(1)]);
+      expect(studios()[0].getAttribute('srcdoc')).toContain('<i>0</i>');
+      t.store.remove([t.els[0].id]);
+      expect(studios()[0].getAttribute('srcdoc')).toContain('<i>1</i>');
+      expect(t.layer.previewsPending).toBe(1);
+    });
+
+    describe('cache', () => {
+      let stored: Map<string, Blob>;
+      const put = vi.fn();
+      const open = vi.fn();
+      beforeEach(() => {
+        stored = new Map();
+        put.mockReset();
+        open.mockReset();
+        vi.stubGlobal('caches', {
+          open: async (name: string) => {
+            open(name);
+            return {
+              match: async (url: string) => (stored.has(url) ? { blob: async () => stored.get(url)! } : undefined),
+              put: async (url: string, res: Response) => {
+                put(url, res);
+                stored.set(url, await res.blob());
+              },
+            };
+          },
+        });
+      });
+
+      const PERSIST = { previewCache: 'persistent' };
+
+      it('a hit in Cache Storage applies the picture without loading the snippet', async () => {
+        const first = setup({ previewWorkers: 1, ...PERSIST }, {}, [snip(0)]);
+        await vi.advanceTimersByTimeAsync(0);
+        await render(studios()[0]);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(open).toHaveBeenCalledWith('corkboard-previews-v1');
+        expect(put).toHaveBeenCalledTimes(1);
+        expect(put.mock.calls[0][0]).toMatch(/\/__corkboard_preview\/[0-9a-f]{16}$/);
+        expect(stored.size).toBe(1);
+        first.layer.dispose();
+        // A new page: the same snippet is found, nothing is rendered.
+        const t = setup({ previewWorkers: 1, ...PERSIST }, {}, [snip(0)]);
+        expect(t.layer.previewsPending).toBe(1);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(studios()).toHaveLength(0);
+        expect(t.rasterize).not.toHaveBeenCalled();
+        expect(t.layer.previewsPending).toBe(0);
+        expect(posterOf(t.store, t.els[0].id)).toMatch(/^blob:pv-/);
+        expect(put).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not touch Cache Storage by default (memory), and works without it', async () => {
+        const t = setup({ previewWorkers: 1 }, {}, [snip(0)]);
+        await render(studios()[0]);
+        expect(open).not.toHaveBeenCalled();
+        expect(put).not.toHaveBeenCalled();
+        t.layer.dispose();
+        vi.unstubAllGlobals();
+        vi.stubGlobal('fetch', () => Promise.reject(new Error('no network in tests')));
+        const u = setup({ previewWorkers: 1, ...PERSIST }, {}, [snip(1)]);
+        await render(studios()[0]);
+        expect(posterOf(u.store, u.els[0].id)).toMatch(/^blob:pv-/);
+      });
+
+      it('survives a Cache Storage that throws', async () => {
+        vi.stubGlobal('caches', { open: async () => { throw new Error('private mode'); } });
+        const t = setup({ previewWorkers: 1, ...PERSIST }, {}, [snip(0)]);
+        await vi.advanceTimersByTimeAsync(0);
+        await render(studios()[0]);
+        expect(posterOf(t.store, t.els[0].id)).toMatch(/^blob:pv-/);
       });
     });
   });

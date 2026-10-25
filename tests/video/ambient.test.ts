@@ -566,3 +566,135 @@ describe('AmbientVideos: teardown', () => {
     expect(videos()).toHaveLength(0);
   });
 });
+
+describe('AmbientVideos: sharing the frame budget', () => {
+  // A stand-in for the board's monitor: the test hands the pool windows, as the monitor would.
+  function fakeMonitor() {
+    const windows = new Set<(w: { fps: number; slow: boolean; smooth: boolean }) => void>();
+    const starts = new Set<() => void>();
+    const loads = new Set<() => boolean>();
+    const poke = vi.fn();
+    return {
+      poke,
+      load: (fn: () => boolean) => (loads.add(fn), () => loads.delete(fn)),
+      onWindow: (fn: (w: { fps: number; slow: boolean; smooth: boolean }) => void) => (windows.add(fn), () => windows.delete(fn)),
+      onStart: (fn: () => void) => (starts.add(fn), () => starts.delete(fn)),
+      busy: () => [...loads].some((l) => l()),
+      slow: () => windows.forEach((f) => f({ fps: 20, slow: true, smooth: false })),
+      smooth: () => windows.forEach((f) => f({ fps: 60, slow: false, smooth: true })),
+      mid: () => windows.forEach((f) => f({ fps: 48, slow: false, smooth: false })),
+      restart: () => starts.forEach((f) => f()),
+    };
+  }
+  let monitor: ReturnType<typeof fakeMonitor>;
+  beforeEach(() => {
+    pool.dispose();
+    monitor = fakeMonitor();
+    pool = new AmbientVideos({
+      root,
+      camera: () => camera,
+      viewport: () => VIEW,
+      *candidates(): IterableIterator<AmbientCandidate> {
+        for (const [id, c] of cards) if (c.src) yield { id, x: c.x, y: c.y, w: c.w, h: c.h };
+      },
+      target(id): VideoTarget | null {
+        const c = cards.get(id);
+        return c?.src ? { id, src: c.src, box: { x: c.x, y: c.y, w: c.w, h: c.h }, radius: 8 } : null;
+      },
+      onChange: () => void changes++,
+      env,
+      frameRate: monitor as never,
+    });
+    addCards(20);
+    pool.setOptions({ always: true, loop: true, muted: true, minPlayPx: 0, maxPlaying: 8 });
+    settle();
+  });
+
+  it('plays maxPlaying clips and asks to be measured while they do', () => {
+    expect(pool.cap).toBe(8);
+    expect(pool.playingIds.size).toBe(8);
+    expect(monitor.busy()).toBe(true);
+    expect(monitor.poke).toHaveBeenCalled();
+  });
+
+  it('plays 60% of what plays on a slow window, never fewer than one, keeping the biggest and most central', () => {
+    const before = new Set(pool.playingIds);
+    const seen: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      monitor.slow();
+      settle();
+      seen.push(pool.cap);
+    }
+    expect(seen).toEqual([4, 2, 1, 1, 1, 1]);
+    expect(pool.playingIds.size).toBe(1);
+    // The one that is left was among the eight that played: the pool ranks, it does not reshuffle.
+    expect(before.has([...pool.playingIds][0])).toBe(true);
+    // The clips it let go of are paused and have no source any more.
+    fadeOut();
+    expect(withSrc()).toHaveLength(1);
+  });
+
+  it('asks to be measured again when its cap moves', () => {
+    monitor.poke.mockClear();
+    monitor.slow();
+    expect(monitor.poke).toHaveBeenCalled();
+  });
+
+  it('gives clips back after two smooth windows in a row, up to maxPlaying, and not on a window in between', () => {
+    for (let i = 0; i < 3; i++) monitor.slow();
+    settle();
+    expect(pool.cap).toBe(1);
+    monitor.smooth();
+    expect(pool.cap).toBe(1);
+    monitor.mid();
+    monitor.smooth();
+    expect(pool.cap).toBe(1);
+    const up: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      monitor.smooth();
+      up.push(pool.cap);
+    }
+    settle();
+    expect(up).toEqual([2, 2, 3, 3, 5, 5, 8, 8]);
+    expect(pool.playingIds.size).toBe(8);
+  });
+
+  it('counts smooth windows from the start of a burst', () => {
+    for (let i = 0; i < 3; i++) monitor.slow();
+    monitor.smooth();
+    monitor.restart();
+    monitor.smooth();
+    expect(pool.cap).toBe(1);
+    monitor.smooth();
+    expect(pool.cap).toBe(2);
+  });
+
+  it('never goes past maxPlaying, and maxPlayingTouch on a touch device', () => {
+    pool.setTouch(true);
+    pool.setOptions({ always: true, loop: true, muted: true, minPlayPx: 0, maxPlayingTouch: 2 });
+    settle();
+    expect(pool.cap).toBe(2);
+    monitor.slow();
+    expect(pool.cap).toBe(1);
+    for (let i = 0; i < 6; i++) monitor.smooth();
+    expect(pool.cap).toBe(2);
+  });
+
+  it('forgets the slowdown when the pool is switched off, and is not measured while nothing plays', () => {
+    monitor.slow();
+    expect(pool.cap).toBe(4);
+    pool.setOptions({ always: false, loop: true, muted: true });
+    settle();
+    fadeOut();
+    expect(monitor.busy()).toBe(false);
+    monitor.slow();
+    pool.setOptions({ always: true, loop: true, muted: true, minPlayPx: 0, maxPlaying: 8 });
+    expect(pool.cap).toBe(8);
+  });
+
+  it('is not measured in a hidden tab', () => {
+    envState.hidden = true;
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(monitor.busy()).toBe(false);
+  });
+});

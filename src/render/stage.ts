@@ -186,6 +186,8 @@ export class Stage {
   // ── Overrides applied on top of the committed state ──
   private readonly previews = new Map<ElementId, PreviewRect>();
   private readonly hidden = new Set<ElementId>();
+  // Runtime pictures that stand in for an element's `media.src` / `sizes` (see setPosterOverride).
+  private readonly posters = new Map<ElementId, string>();
   private readonly alphas = new Map<ElementId, number>();
   // Elements that must stay mounted regardless of the window (previewed, being dragged).
   private readonly pinned = new Set<ElementId>();
@@ -495,6 +497,7 @@ export class Stage {
         this.hidden.delete(id);
         this.alphas.delete(id);
         this.pinned.delete(id);
+        this.posters.delete(id);
       }
       this.pendingRemoved.clear();
       changed = true;
@@ -571,6 +574,7 @@ export class Stage {
       const el = store.get(id);
       if (!el || !definitionOf(el.kind).textured) this.freeSlot(id);
     }
+    for (const id of [...this.posters.keys()]) if (!store.get(id)) this.posters.delete(id);
     for (const el of store.elements()) if (definitionOf(el.kind).textured) this.allocSlot(el.id);
     const all = ['x', 'y', 'w', 'h', 'rot', 'locked', 'media', 'radius'];
     for (const [id, view] of [...this.views]) {
@@ -670,11 +674,17 @@ export class Stage {
     card.w = el.w;
     card.h = el.h;
     card.thumbhash = this.hashOf(m.thumbhash);
-    // A missing rendition falls back to the picture itself: the decode worker downsamples it.
-    card.l1Url = m.sizes?.small ?? m.src;
-    card.l2Url = m.sizes?.medium ?? m.src;
-    card.l3Url = m.sizes?.large ?? m.src;
+    [card.l1Url, card.l2Url, card.l3Url] = this.urlsOf(el);
     card.radius = el.radius;
+  }
+
+  // The renditions a card requests: its poster override when it has one, else the element's own. A missing
+  // rendition falls back to the picture itself: the decode worker downsamples it.
+  private urlsOf(el: Element): [string | undefined, string | undefined, string | undefined] {
+    const o = this.posters.get(el.id);
+    if (o !== undefined) return [o, o, o];
+    const m = el.media;
+    return [m.sizes?.small ?? m.src, m.sizes?.medium ?? m.src, m.sizes?.large ?? m.src];
   }
 
   private newCard(slot: number, el: Element): BoardCard {
@@ -715,9 +725,7 @@ export class Stage {
   // Only committed store changes get here: a live drag / resize preview never touches the card.
   private refreshCard(card: BoardCard, el: Element): boolean {
     const m = el.media;
-    const l1 = m.sizes?.small ?? m.src;
-    const l2 = m.sizes?.medium ?? m.src;
-    const l3 = m.sizes?.large ?? m.src;
+    const [l1, l2, l3] = this.urlsOf(el);
     const long = Math.max(el.w, el.h);
     const baked = this.slotBaked[card.id];
     const aspect = el.w > 0 ? el.h / el.w : 0;
@@ -746,6 +754,40 @@ export class Stage {
   private syncCard(view: MediaView, el: Element): void {
     const card = view.card;
     if (card && this.refreshCard(card, el)) view.setTexture(null, -1, this.ctx);
+  }
+
+  // A runtime picture for an element, used in place of its `media.src` / `sizes` and never written to the
+  // store (a generated tile, a snapshot of a live page: blob URLs that die with the page). null: back to the
+  // element's own. Dropped when the element is removed. The change swaps the card's pictures without the
+  // placeholder in between: what is resident stays on screen until the first level of the new one lands
+  // (TextureManager.swapPictures), so a poster that replaces a poster never flashes.
+  setPosterOverride(id: ElementId, url: string | null): void {
+    if ((this.posters.get(id) ?? null) === url) return;
+    if (url === null) this.posters.delete(id);
+    else this.posters.set(id, url);
+    const slot = this.slotOf.get(id);
+    const card = slot === undefined ? null : this.slotCard[slot];
+    const el = this.store?.get(id);
+    // No card yet: it is built from the override when it is.
+    if (slot === undefined || !card || !el) return;
+    const [l1, l2, l3] = this.urlsOf(el);
+    if (card.l1Url === l1 && card.l2Url === l2 && card.l3Url === l3) return;
+    card.l1Url = l1;
+    card.l2Url = l2;
+    card.l3Url = l3;
+    const view = this.slotView[slot];
+    // Nothing to swap to (the override went and the element has no picture of its own), or nobody looking.
+    this.tm.swapPictures(card.id, view !== null && l1 !== undefined);
+    if (view && this.paintMedia(view)) this.dirty = true;
+    this.lodDirty = true;
+    this.requestFrame();
+  }
+
+  // The card's sprite shows a rendition of its current picture: not the placeholder, not the ThumbHash and not
+  // what a poster override replaced (still on screen while the new one decodes).
+  posterShown(id: ElementId): boolean {
+    const v = this.views.get(id);
+    return v instanceof MediaView && v.card !== null && v.shown >= 1 && !this.tm.hasOutgoing(v.card);
   }
 
   // The same for a slot that has no view (the element is off screen): its card, and the textures its ThumbHash
@@ -1396,6 +1438,8 @@ export class Stage {
         r.y < view.y1 + my &&
         r.y + r.h > view.y0 - my;
       const dist = Math.hypot(r.x + r.w / 2 - cx, r.y + r.h / 2 - cy) * scale;
+      // The old picture of a swapped poster is only worth keeping while the card shows (and asks for) the new.
+      if ((lvl === 0 || !onScreen) && tm.hasOutgoing(card)) tm.dropOutgoing(card);
       if (lvl === 3) {
         if (onScreen) l3.push({ slot, dist, d });
         lvl = 2;

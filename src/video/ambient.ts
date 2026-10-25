@@ -21,8 +21,10 @@
 // A card the hover overlay plays WITH sound (the pool is muted, the overlay is not) is excluded from the pool
 // while it does (`exclude`), so one card is never two streams.
 import type { Camera } from '../math';
+import { SMOOTH_WINDOWS, type FrameRateMonitor, type FrameWindow } from '../render/frameRate';
 import { VideoOverlay, type VideoTarget } from './video';
 import {
+  AMBIENT_MAX_STREAMS,
   AMBIENT_MAX_PLAYING,
   AMBIENT_MAX_PLAYING_TOUCH,
   AMBIENT_MIN_PLAY_PX,
@@ -42,6 +44,10 @@ export const STARTS_PER_PASS = 6;
 export const START_SPACING_MS = 50;
 // Elements kept (empty) for the next card; past this they are let go of for good.
 export const MAX_IDLE = 16;
+// A slow window cuts the playing cap to this share of what plays (never under 1 clip); a pair of smooth ones
+// gives back this much (rounded up), until `maxPlaying` is reached again.
+export const SLOW_FACTOR = 0.6;
+export const SMOOTH_GROWTH = 1.5;
 
 export interface AmbientDeps {
   // The overlay layer the elements go in.
@@ -65,6 +71,8 @@ export interface AmbientDeps {
   setTimer?: typeof setTimeout;
   clearTimer?: typeof clearTimeout;
   now?(): number;
+  // The board's frame-rate monitor: while the page runs slow the pool plays fewer clips (see `cap`).
+  frameRate?: FrameRateMonitor;
 }
 
 export class AmbientVideos {
@@ -90,6 +98,9 @@ export class AmbientVideos {
   private maxPlaying = AMBIENT_MAX_PLAYING;
   private maxPlayingTouch = AMBIENT_MAX_PLAYING_TOUCH;
   private excluded: string | null = null;
+  // The cap the frame rate allows (Infinity: none); the effective one also honours maxPlaying.
+  private adaptiveCap = Infinity;
+  private smooth = 0;
   private lastPlan = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
@@ -106,6 +117,17 @@ export class AmbientVideos {
     this.world = world;
     this.writeWorld(deps.camera());
     if (deps.watch) this.cleanups.push(deps.watch(() => this.schedule()));
+    const monitor = deps.frameRate;
+    if (monitor) {
+      this.cleanups.push(
+        // Only a playing pool is worth measuring.
+        monitor.load(() => this.active.size > 0 && !this.suspended && !this.disposed),
+        monitor.onWindow((w) => this.onWindow(w)),
+        monitor.onStart(() => {
+          this.smooth = 0;
+        }),
+      );
+    }
     if (typeof document !== 'undefined') {
       const onVisibility = (): void => this.setSuspended(this.env.hidden());
       document.addEventListener('visibilitychange', onVisibility);
@@ -118,6 +140,11 @@ export class AmbientVideos {
       mq.addEventListener?.('change', fn);
       this.cleanups.push(() => mq.removeEventListener?.('change', fn));
     }
+  }
+
+  // How many clips may play now: `maxPlaying` (`maxPlayingTouch` on touch), lowered while the page runs slow.
+  get cap(): number {
+    return Math.min(this.touch ? this.maxPlayingTouch : this.maxPlaying, this.adaptiveCap, AMBIENT_MAX_STREAMS);
   }
 
   // The ids that play now.
@@ -153,6 +180,7 @@ export class AmbientVideos {
     this.loop = o.loop;
     this.soundMuted = o.muted;
     this.on = o.always;
+    if (!o.always) this.resetBudget();
     if (loopChanged) for (const v of [...this.active.values(), ...this.idle]) this.configure(v);
     this.replan();
   }
@@ -176,6 +204,37 @@ export class AmbientVideos {
     if (id === this.excluded) return;
     this.excluded = id;
     this.replan();
+  }
+
+  private resetBudget(): void {
+    this.adaptiveCap = Infinity;
+    this.smooth = 0;
+  }
+
+  // One window measured. Slow: play 60% of what plays now (at least one clip), the most visible ones. Smooth for
+  // SMOOTH_WINDOWS in a row: give back 50%, up to `maxPlaying`.
+  private onWindow(w: FrameWindow): void {
+    if (this.disposed || !this.on || this.active.size === 0) return;
+    const cap = this.cap;
+    const ceiling = Math.min(this.touch ? this.maxPlayingTouch : this.maxPlaying, AMBIENT_MAX_STREAMS);
+    let next = this.adaptiveCap;
+    if (w.slow) {
+      this.smooth = 0;
+      const lowered = Math.max(1, Math.floor(Math.min(cap, this.active.size) * SLOW_FACTOR));
+      // A slow window never raises the cap.
+      if (lowered < cap) next = lowered;
+    } else if (w.smooth) {
+      if (++this.smooth >= SMOOTH_WINDOWS && this.adaptiveCap < ceiling) {
+        this.smooth = 0;
+        next = Math.ceil(this.adaptiveCap * SMOOTH_GROWTH);
+        if (next >= ceiling) next = Infinity;
+      }
+    } else this.smooth = 0;
+    if (next === this.adaptiveCap) return;
+    this.adaptiveCap = next;
+    this.replan();
+    // The pool changed (replan pokes when the set of clips did): measure what that did to the page.
+    this.deps.frameRate?.poke();
   }
 
   // The camera moved: the elements go with it (a transform each), and the plan is refreshed, throttled.
@@ -290,7 +349,7 @@ export class AmbientVideos {
         camera: this.deps.camera(),
         viewport: this.deps.viewport(),
         playing: new Set(this.active.keys()),
-        cap: this.touch ? this.maxPlayingTouch : this.maxPlaying,
+        cap: this.cap,
         minPlayPx: this.minPlayPx,
       });
       for (const id of ids) {
@@ -336,7 +395,11 @@ export class AmbientVideos {
         this.replan();
       }, START_SPACING_MS);
     }
-    if (changed) this.deps.onChange?.();
+    if (changed) {
+      this.deps.onChange?.();
+      // The pool changed: the load did too.
+      this.deps.frameRate?.poke();
+    }
   }
 
   // An element for a new card: one that is free, else a new one.
