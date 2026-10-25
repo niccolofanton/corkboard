@@ -68,9 +68,9 @@ export const TEMPLATES: readonly { name: string; build: (p: Params) => string }[
         `const B=[];for(let i=0;i<${p.count};i++){const e=document.createElement('div');e.className='b';` +
           `const r=10+i*5;e.style.cssText='width:'+2*r+'px;height:'+2*r+'px;background:hsl('+(${p.hue}+i*${Math.round(p.hue2 % 70) + 20})+' 85% 62%)';` +
           `document.body.append(e);B.push({e,r,x:30+i*40,y:30+i*20,vx:(1.5+i*.7)*${p.speed},vy:(1+i*.9)*${p.speed}})}` +
-          `(function f(){const W=innerWidth,H=innerHeight;for(const b of B){b.x+=b.vx;b.y+=b.vy;` +
+          `let l=0;(function f(t){const k=l?Math.min(4,(t-l)/16.67):1;l=t;const W=innerWidth,H=innerHeight;for(const b of B){b.x+=b.vx*k;b.y+=b.vy*k;` +
           `if(b.x<0||b.x>W-2*b.r)b.vx*=-1;if(b.y<0||b.y>H-2*b.r)b.vy*=-1;` +
-          `b.e.style.transform='translate('+b.x+'px,'+b.y+'px)'}requestAnimationFrame(f)})()`,
+          `b.e.style.transform='translate('+b.x+'px,'+b.y+'px)'}requestAnimationFrame(f)})(0)`,
       ),
   },
   {
@@ -83,9 +83,9 @@ export const TEMPLATES: readonly { name: string; build: (p: Params) => string }[
         `const c=document.getElementById('c'),g=c.getContext('2d');let W,H;` +
           `function rs(){W=c.width=innerWidth;H=c.height=innerHeight}rs();addEventListener('resize',rs);` +
           `const P=Array.from({length:${24 + p.count * 8}},(_,i)=>({x:Math.random()*W,y:Math.random()*H,a:Math.random()*6.28,s:(.5+Math.random())*${p.speed},h:${p.hue}+i*${(p.hue2 % 5) + 2}}));` +
-          `(function f(){g.fillStyle='rgba(0,0,0,.12)';g.fillRect(0,0,W,H);` +
-          `for(const q of P){q.a+=(Math.random()-.5)*.3;q.x=(q.x+Math.cos(q.a)*q.s*2+W)%W;q.y=(q.y+Math.sin(q.a)*q.s*2+H)%H;` +
-          `g.fillStyle='hsl('+q.h+' 90% 65%)';g.beginPath();g.arc(q.x,q.y,2.2,0,6.28);g.fill()}requestAnimationFrame(f)})()`,
+          `let l=0;(function f(t){const k=l?Math.min(4,(t-l)/16.67):1;l=t;g.fillStyle='rgba(0,0,0,'+(1-Math.pow(.88,k))+')';g.fillRect(0,0,W,H);` +
+          `for(const q of P){q.a+=(Math.random()-.5)*.3*Math.sqrt(k);q.x=(q.x+Math.cos(q.a)*q.s*2*k+W)%W;q.y=(q.y+Math.sin(q.a)*q.s*2*k+H)%H;` +
+          `g.fillStyle='hsl('+q.h+' 90% 65%)';g.beginPath();g.arc(q.x,q.y,2.2,0,6.28);g.fill()}requestAnimationFrame(f)})(0)`,
       ),
   },
   {
@@ -243,6 +243,23 @@ function photo(seed: number, aspect: number) {
 // The mix of a windows board: live HTML windows, provider embeds, pictures and video clips.
 const MIX = { snippet: 0.45, youtube: 0.51, wiki: 0.55, image: 0.9 }; // cumulative; the rest are videos
 
+// One live HTML window: a random template with its own palette, speed and text. No poster: the layer draws
+// a tile from the title until it goes live.
+export function makeSnippet(rand: () => number, n: number, label: string): ElementInit {
+  const hue = Math.floor(rand() * 360);
+  const p: Params = {
+    n,
+    label,
+    hue,
+    hue2: (hue + 60 + Math.floor(rand() * 180)) % 360,
+    speed: 0.6 + rand() * 1.4,
+    text: `${pick(rand, WORDS)} ${pick(rand, WORDS)} ${pick(rand, WORDS)}`,
+    count: 3 + Math.floor(rand() * 3),
+  };
+  const html = pick(rand, TEMPLATES).build(p);
+  return { media: { embed: { html, title: label }, aspect: pick(rand, ASPECTS) }, aspectLocked: false };
+}
+
 export function makeWindows(n: number, rand: () => number, start = 0): ElementInit[] {
   const out: ElementInit[] = [];
   // Walk the lists in a shuffled order so the same video or article is as far apart as it can be.
@@ -252,19 +269,7 @@ export function makeWindows(n: number, rand: () => number, start = 0): ElementIn
     const label = `Window #${String(start + i).padStart(4, '0')}`;
     const kind = rand();
     if (kind < MIX.snippet) {
-      const hue = Math.floor(rand() * 360);
-      const p: Params = {
-        n: start + i,
-        label,
-        hue,
-        hue2: (hue + 60 + Math.floor(rand() * 180)) % 360,
-        speed: 0.6 + rand() * 1.4,
-        text: `${pick(rand, WORDS)} ${pick(rand, WORDS)} ${pick(rand, WORDS)}`,
-        count: 3 + Math.floor(rand() * 3),
-      };
-      const html = pick(rand, TEMPLATES).build(p);
-      // No poster: the layer draws a tile from the title.
-      out.push({ media: { embed: { html, title: label }, aspect: pick(rand, ASPECTS) }, aspectLocked: false });
+      out.push(makeSnippet(rand, start + i, label));
     } else if (kind < MIX.youtube) {
       // A start time apart, so the same video is not the same frame twice.
       const id = YOUTUBE_IDS[yt++ % YOUTUBE_IDS.length];

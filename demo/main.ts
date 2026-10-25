@@ -5,7 +5,8 @@ import {
   type EmbedResolution,
   type VideoMode,
 } from 'corkboard';
-import { makeWindows, placeWindows } from './windows';
+import { startPerfPanel } from './perfChart';
+import { makeSnippet, makeWindows, placeWindows } from './windows';
 
 const COUNT = 600;
 // `?windows=1000`: a board of that many different, autoplaying embeds (capped) instead of the picture cards.
@@ -42,10 +43,22 @@ function picsum(seed: number, w: number, aspect: number): string {
   return `https://picsum.photos/seed/${seed}/${w}/${Math.round(w * aspect)}`;
 }
 
+// Share of the grid that is live HTML (an animated snippet in a sandboxed iframe) rather than a picture.
+const SNIPPET_SHARE = 0.15;
+
 function makeCards(n: number): ElementInit[] {
   const out: ElementInit[] = [];
   for (let i = 0; i < n; i++) {
     const seed = nextSeed++;
+    if (rand() < SNIPPET_SHARE) {
+      // Aspect-locked like the pictures, so the grid gives it the column's width.
+      out.push({
+        ...makeSnippet(rand, seed, `Snippet #${String(seed).padStart(4, '0')}`),
+        w: 200 + Math.round(rand() * 100),
+        aspectLocked: true,
+      });
+      continue;
+    }
     const aspect = ASPECTS[Math.floor(rand() * ASPECTS.length)];
     const hue = Math.floor(rand() * 360);
     const media = {
@@ -319,7 +332,9 @@ function startStats(board: Corkboard): void {
     stat('tick', `${(s.tickMs as Record<string, number>).p95} ms`);
     stat('textures', `${Math.round((s.textureBytes as number) / 1048576)} MB`);
     stat('lod', lv.join('/'));
-    stat('playing', String(board.playing.size));
+    // Clips playing / the cap the frame rate allows now (it drops while the page runs slow).
+    const videoCap = board.videoBudget;
+    stat('playing', `${board.playing.size}/${Number.isFinite(videoCap) ? videoCap : '∞'}`);
     const max = board.embeds.maxLive;
     stat(
       'embeds',
@@ -328,9 +343,11 @@ function startStats(board: Corkboard): void {
     stat('parked', String(board.embeds.parked.size));
     stat('culled', String(board.embeds.culled.size));
     stat('frozen', String(board.embeds.frozen.size));
+    stat('freeze', `${Math.round(board.embeds.freezeThreshold)} px`);
     const budget = board.embeds.animatingBudget;
     stat('animating', `${board.embeds.animating.size}/${Number.isFinite(budget) ? budget : '∞'}`);
     stat('loading', String(board.embeds.loading.size));
+    stat('previews', String(board.embeds.previewsPending));
     stat('selected', String(board.selection.length));
     const state = perSec > 0 ? 'rendering' : 'idle';
     $('stats-state').dataset.state = state;
@@ -368,12 +385,15 @@ async function main(): Promise<void> {
 
   const board = await Corkboard.create($('board'), {
     theme: 'dark',
+    // Times each GPU render, for the GPU chart in the stats panel.
+    gpuTimer: true,
     // The library only spends a stream on a card at least 160 px on screen. The demo opens on the whole board,
     // where a card is about 30 px: let the clips play from there (still at most 8 at once).
     video: { mode: 'always', minPlayPx: 24 },
     snapping: { guides: true, grid: false },
     // The windows board starts with everything on: every card in view live, no cap, autoplay.
-    embeds: WINDOWS > 0 ? { resolve: resolveEmbed, ...WINDOWS_OPTIONS } : { resolve: resolveEmbed },
+    // Snippet previews are kept across reloads here (the library default is this page only).
+    embeds: WINDOWS > 0 ? { resolve: resolveEmbed, previewCache: 'persistent', ...WINDOWS_OPTIONS } : { resolve: resolveEmbed, previewCache: 'persistent' },
   });
   (window as unknown as { board: Corkboard }).board = board;
 
@@ -481,6 +501,7 @@ async function main(): Promise<void> {
   };
 
   startStats(board);
+  startPerfPanel($('hud'), board);
   board.on('selection', ({ ids }) => {
     if (ids.length > 0) toast(`${ids.length} selected`);
   });

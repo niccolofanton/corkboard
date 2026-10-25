@@ -359,6 +359,9 @@ async function main(): Promise<void> {
     $('s-animating').textContent = e.animating
       ? `${e.animating.size} / ${e.animatingBudget === Infinity ? '∞' : String(e.animatingBudget)}`
       : 'n/a';
+    // Snippet previews, in builds that have them.
+    const pending = (board.embeds as { previewsPending?: number }).previewsPending;
+    $('s-previews').textContent = pending === undefined ? 'n/a' : String(pending);
     $('s-destroyed').textContent = String(destroyed);
     $('s-zoom').textContent = `${Math.round(board.camera.get().scale * 100)}%`;
     $('log').textContent = lines.join('\n');
