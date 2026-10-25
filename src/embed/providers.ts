@@ -5,24 +5,28 @@
 // What cannot be known here (oEmbed titles, og:image, `X-Frame-Options`) belongs to the host's `resolve`
 // option, on a server (see EmbedResolver in resolve.ts).
 
+/** Providers recognised from a URL. They get a nocookie / embed URL, a natural card shape and a poster that needs no server; any other URL is `'generic'`. */
 export type EmbedProvider = 'youtube' | 'vimeo' | 'spotify' | 'codepen' | 'figma' | 'generic';
 
+/** What a URL says about an embed card, without a network request. */
 export interface ParsedEmbed {
-  // The URL as the card keeps it: https, no credentials.
+  /** The URL as the card keeps it: https, no credentials. */
   url: string;
-  // Host without `www.`, for the generated tile.
+  /** Host without `www.`, for the generated tile. */
   host: string;
+  /** Which provider the URL belongs to. */
   provider: EmbedProvider;
-  // What the iframe loads when the card goes live.
+  /** What the iframe loads when the card goes live. */
   iframeSrc: string;
-  // height / width of the card for this provider, when it has a natural one.
+  /** `aspect`: height / width of the card for this provider, when it has a natural one. */
   aspect?: number;
-  // Poster URLs that need no server, best first (each must be CORS-readable; the layer probes them).
+  /** Poster URLs that need no server, best first (each must be CORS-readable; the layer probes them). */
   posters: string[];
-  // A human label for the tile ("YouTube").
+  /** A human label for the tile ("YouTube"). */
   label: string;
 }
 
+/** The human label of each provider, as shown on a tile. */
 export const PROVIDER_LABEL: Record<EmbedProvider, string> = {
   youtube: 'YouTube',
   vimeo: 'Vimeo',
@@ -34,9 +38,13 @@ export const PROVIDER_LABEL: Record<EmbedProvider, string> = {
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
-// Only http(s) URLs without credentials. `http:` is upgraded to `https:` except on localhost (dev) and on
-// an explicit port (a LAN or dev server there has no TLS). `javascript:`, `data:`, `file:`, `blob:` and the
-// rest are refused.
+/**
+ * Cleans a URL for an embed card: only http(s) URLs without credentials. `http:` is upgraded to `https:` except on
+ * localhost (dev) and on an explicit port (a LAN or dev server there has no TLS). `javascript:`, `data:`, `file:`,
+ * `blob:` and the rest are refused.
+ *
+ * @returns The normalised URL, or `null` when it cannot be an embed.
+ */
 export function normalizeEmbedUrl(raw: string): string | null {
   let u: URL;
   try {
@@ -52,7 +60,7 @@ export function normalizeEmbedUrl(raw: string): string | null {
 
 const stripWww = (h: string): string => h.replace(/^www\./, '');
 
-// `90`, `90s`, `1m30s`, `1h2m3s` -> seconds.
+/** `90`, `90s`, `1m30s`, `1h2m3s` -> seconds. */
 export function parseTimestamp(t: string | null): number | null {
   if (!t) return null;
   if (/^\d+$/.test(t)) return Number(t);
@@ -207,7 +215,13 @@ function parseFigma(u: URL, host: string): Omit<ParsedEmbed, 'url' | 'host' | 'l
 
 const PARSERS = [parseYouTube, parseVimeo, parseSpotify, parseCodePen, parseFigma];
 
-// null: not an http(s) URL. Any other URL parses as `generic` (loaded as is, with the stricter sandbox).
+/**
+ * Parses a pasted URL into what an embed card needs: provider, iframe URL (`youtube.com/watch?v=x` becomes
+ * `youtube-nocookie.com/embed/x`), poster candidates and the card's shape. Use it to validate input before it
+ * becomes a card. Any other http(s) URL parses as `generic` (loaded as is, with the stricter sandbox).
+ *
+ * @returns `null` when the URL is not http(s).
+ */
 export function parseEmbedUrl(raw: string): ParsedEmbed | null {
   const url = normalizeEmbedUrl(raw);
   if (url === null) return null;
@@ -239,6 +253,7 @@ const ALLOWLIST: readonly { host: string; path: RegExp; provider: EmbedProvider 
   { host: 'www.figma.com', path: /^\/embed$/, provider: 'figma' },
 ];
 
+/** The provider an iframe URL belongs to. */
 export function providerOfIframeSrc(src: string): EmbedProvider {
   try {
     const u = new URL(src);
@@ -249,10 +264,12 @@ export function providerOfIframeSrc(src: string): EmbedProvider {
   }
 }
 
-// The iframe URL of a video provider, set to start playing on its own and muted (browsers only let a muted
-// page autoplay), inline on iOS and looping. YouTube needs `playlist=<id>` to loop a single video; a
-// `list` the URL already carries is kept instead. Vimeo keeps its unlisted-video `h` hash. Any other
-// provider (or a URL that does not parse) comes back as is. Pure; the stored embed info is never touched.
+/**
+ * The iframe URL of a video provider, set to start playing on its own and muted (browsers only let a muted
+ * page autoplay), inline on iOS and looping. YouTube needs `playlist=<id>` to loop a single video; a
+ * `list` the URL already carries is kept instead. Vimeo keeps its unlisted-video `h` hash. Any other
+ * provider (or a URL that does not parse) comes back as is. Pure; the stored embed info is never touched.
+ */
 export function withAutoplay(provider: EmbedProvider, src: string): string {
   if (provider !== 'youtube' && provider !== 'vimeo') return src;
   let u: URL;
@@ -278,10 +295,12 @@ export function withAutoplay(provider: EmbedProvider, src: string): string {
   return u.toString();
 }
 
-// A YouTube iframe URL with its postMessage API on (`enablejsapi=1`, plus `origin` when the page's is an
-// http(s) one: the player ignores commands from a page it cannot match). The layer pauses and resumes the
-// player with it. Vimeo's player takes its commands without a flag; any other provider (or a URL that does
-// not parse) comes back as is. Pure; the stored embed info is never touched.
+/**
+ * A YouTube iframe URL with its postMessage API on (`enablejsapi=1`, plus `origin` when the page's is an
+ * http(s) one: the player ignores commands from a page it cannot match). The layer pauses and resumes the
+ * player with it. Vimeo's player takes its commands without a flag; any other provider (or a URL that does
+ * not parse) comes back as is. Pure; the stored embed info is never touched.
+ */
 export function withJsApi(provider: EmbedProvider, src: string, origin?: string): string {
   if (provider !== 'youtube') return src;
   let u: URL;
@@ -295,4 +314,5 @@ export function withJsApi(provider: EmbedProvider, src: string, origin?: string)
   return u.toString();
 }
 
+/** Whether a provider is one the library knows (its pages get the sandbox of a provider). */
 export const isAllowlisted = (p: EmbedProvider): boolean => p !== 'generic';

@@ -16,48 +16,69 @@ import {
   type EmbedProvider,
 } from './providers';
 
-// What a resolver may tell about a URL. Every field is optional; what it leaves out stays as the library
-// derived it.
+/** What a resolver may tell about a URL. Every field is optional; what it leaves out stays as the library derived it. */
 export interface EmbedInfo {
-  // A CORS-readable image URL for the poster.
+  /** A CORS-readable image URL for the poster. */
   poster?: string;
-  // The URL to load in the iframe, when it is not the card's `url` (an oEmbed `iframe` src, say).
+  /** The URL to load in the iframe, when it is not the card's `url` (an oEmbed `iframe` src, say). */
   iframeSrc?: string;
-  // height / width of the card.
+  /** `aspect`: height / width of the card. */
   aspect?: number;
+  /** Shown on the generated tile and as the iframe's `title`. */
   title?: string;
-  // false: the page refuses framing. The card is a bookmark: it never goes live, and a double-click opens
-  // the URL in a new tab.
+  /**
+   * `false`: the page refuses framing. The card is a bookmark: it never goes live, and a double-click opens
+   * the URL in a new tab.
+   */
   frameable?: boolean;
 }
 
-// Example (a Cloudflare Worker that caches oEmbed / og:image / framing headers per URL):
-//
-//   resolve: async (url) => {
-//     const r = await fetch(`/api/embed-info?url=${encodeURIComponent(url)}`);
-//     return r.ok ? ((await r.json()) as EmbedInfo) : null;
-//   }
+/**
+ * A lookup on a server of yours for what the browser cannot know about a URL: oEmbed thumbnails and titles,
+ * `og:image`, a screenshot, whether the page may be framed at all (`X-Frame-Options`, CSP `frame-ancestors`).
+ * Cache it and re-host the poster CORS-enabled (a WebGL texture needs CORS).
+ *
+ * @example
+ * ```ts
+ * resolve: async (url) => {
+ *   const r = await fetch(`/api/embed-info?url=${encodeURIComponent(url)}`);
+ *   return r.ok ? ((await r.json()) as EmbedInfo) : null;
+ * }
+ * ```
+ */
 export type EmbedResolver = (url: string) => Promise<EmbedInfo | null | undefined> | EmbedInfo | null | undefined;
 
-// Everything the layer knows about a card's embed, settled.
+/** Everything the layer knows about a card's embed, settled (`board.embeds.info(id)`). */
 export interface ResolvedEmbed {
+  /** A page (`'url'`) or a snippet (`'html'`). */
   kind: 'url' | 'html';
+  /** The provider, `'generic'` for a snippet or an unknown host. */
   provider: EmbedProvider;
-  // The card's URL (normalised), or '' for a snippet.
+  /** The card's URL (normalised), or '' for a snippet. */
   url: string;
+  /** Host of the URL (`'html'` for a snippet). */
   host: string;
-  // What the tile says: the provider, else the host; the title if there is one.
+  /** What the tile says: the provider, else the host; the title if there is one. */
   label: string;
+  /** The title, from the card or the resolver. */
   title?: string;
-  // The URL to load live. null: the card cannot go live (not an http(s) URL) or is a snippet.
+  /** The URL to load live. null: the card cannot go live (not an http(s) URL) or is a snippet. */
   iframeSrc: string | null;
+  /** `false`: the page refuses framing; the card is a bookmark and never goes live. */
   frameable: boolean;
+  /**
+   * `true`: a snippet that kept navigating its frame away from its document (3 times within 10 s) and was
+   * blocked; it stays on its poster, and `frameable` is `false` while this is set. Cleared when the card's content
+   * changes. Absent otherwise.
+   */
+  blocked?: boolean;
+  /** `aspect`: height / width of the card, when the provider or the resolver gave one. */
   aspect?: number;
-  // Poster candidates, best first.
+  /** Poster candidates, best first. */
   posters: string[];
 }
 
-// The synchronous part: what the URL alone says.
+/** The synchronous part: what the URL alone says. */
 export function baseResolved(embed: EmbedSource): ResolvedEmbed {
   if (embed.html !== undefined) {
     return {
@@ -102,8 +123,10 @@ export function baseResolved(embed: EmbedSource): ResolvedEmbed {
 
 const finitePositive = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0;
 
-// A resolver's answer over the base. Untrusted: an `iframeSrc` that is not an http(s) URL is ignored, a
-// resolver cannot make a snippet frameable or a card load something the URL parser refused.
+/**
+ * A resolver's answer over the base. Untrusted: an `iframeSrc` that is not an http(s) URL is ignored, a
+ * resolver cannot make a snippet frameable or a card load something the URL parser refused.
+ */
 export function mergeResolved(base: ResolvedEmbed, info: EmbedInfo | null | undefined): ResolvedEmbed {
   if (!info || base.kind === 'html') return base;
   const out: ResolvedEmbed = { ...base };
@@ -120,10 +143,12 @@ export function mergeResolved(base: ResolvedEmbed, info: EmbedInfo | null | unde
   return out;
 }
 
-// Can the card go live?
+/** Can the card go live? */
 export const canGoLive = (r: ResolvedEmbed): boolean =>
   r.frameable && (r.kind === 'html' || r.iframeSrc !== null);
 
-// Do two embeds describe the same content? (A card whose embed did not change keeps its poster and its live
-// frame.) The title and the resolution are labels, not content.
+/**
+ * Do two embeds describe the same content? (A card whose embed did not change keeps its poster and its live
+ * frame.) The title and the resolution are labels, not content.
+ */
 export const sameEmbed = (a: EmbedSource, b: EmbedSource): boolean => a.url === b.url && a.html === b.html;

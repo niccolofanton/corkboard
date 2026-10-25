@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { autoSpot, autoSpotArea, shouldPanTo } from '../../src/layout';
-import type { Box } from '../../src/interact/geometry';
+import type { Aabb } from '../../src/interact/geometry';
 
-const box = (minX: number, minY: number, maxX: number, maxY: number): Box => ({
+const box = (minX: number, minY: number, maxX: number, maxY: number): Aabb => ({
   minX,
   minY,
   maxX,
   maxY,
 });
 
-const overlaps = (a: Box, b: Box): boolean =>
+const overlaps = (a: Aabb, b: Aabb): boolean =>
   a.minX < b.maxX && a.maxX > b.minX && a.minY < b.maxY && a.maxY > b.minY;
 
 describe('autoSpot', () => {
@@ -95,7 +95,7 @@ describe('autoSpot', () => {
       const v = box(0, 0, vw, vh);
       const bw = (1 + Math.floor(rnd() * 5)) * 48;
       const bh = (1 + Math.floor(rnd() * 5)) * 48;
-      const occupied: Box[] = [];
+      const occupied: Aabb[] = [];
       const count = Math.floor(rnd() * 120);
       for (let i = 0; i < count; i++) {
         const x = Math.floor(rnd() * 40 - 10) * 48;
@@ -135,7 +135,7 @@ describe('autoSpot', () => {
 
   it('stays bounded and valid for a huge viewport (very low zoom)', () => {
     const v = box(0, 0, 76_800, 43_200); // 4K at zoom 0.05
-    const occupied: Box[] = [];
+    const occupied: Aabb[] = [];
     for (let i = 0; i < 200; i++)
       occupied.push(box(36_000 + i * 20, 20_000, 37_000 + i * 20, 23_000));
     const spot = autoSpot({ w: 1000, h: 1000 }, v, occupied);
@@ -181,7 +181,7 @@ describe('autoSpotArea', () => {
     const v = box(0, 0, 1000, 600);
     const blk = { w: 100, h: 100 };
     // Cards everywhere inside the reach but a 200 x 200 hole near the end of it.
-    const all: Box[] = [];
+    const all: Aabb[] = [];
     for (let x = -2200; x < 3000; x += 100) {
       for (let y = -2200; y < 2800; y += 100) {
         if (x >= 2000 && x < 2200 && y >= 200 && y < 400) continue;

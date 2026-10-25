@@ -95,7 +95,7 @@ describe('tile', () => {
       label: 'en.wikipedia.org',
       title: 'Moodboard',
     });
-    expect(tileSpec(baseResolved({ html: 'x' }))).toMatchObject({ glyph: 'code', title: 'HTML snippet' });
+    expect(tileSpec(baseResolved({ html: 'x' }))).toMatchObject({ glyph: null, hue: null, title: 'HTML snippet' });
     expect(tileSpec(baseResolved({ html: 'x', title: 'Counter' })).title).toBe('Counter');
   });
   it('shows a bookmark glyph for a page that cannot be framed', () => {

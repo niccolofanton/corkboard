@@ -1,6 +1,6 @@
 import {
   Corkboard,
-  type ElementInit,
+  type CardInit,
   type EmbedInfo,
   type EmbedResolution,
   type VideoMode,
@@ -46,8 +46,8 @@ function picsum(seed: number, w: number, aspect: number): string {
 // Share of the grid that is live HTML (an animated snippet in a sandboxed iframe) rather than a picture.
 const SNIPPET_SHARE = 0.15;
 
-function makeCards(n: number): ElementInit[] {
-  const out: ElementInit[] = [];
+function makeCards(n: number): CardInit[] {
+  const out: CardInit[] = [];
   for (let i = 0; i < n; i++) {
     const seed = nextSeed++;
     if (rand() < SNIPPET_SHARE) {
@@ -119,7 +119,7 @@ const SNIPPET_COUNTER = `<!doctype html><style>
 </script>`;
 
 const EMBED_W = 480;
-const EMBEDS: ElementInit[] = [
+const EMBEDS: CardInit[] = [
   { media: { embed: { url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw' } } },
   { media: { embed: { url: 'https://youtu.be/aqz-KE-bpKQ' } } },
   { media: { embed: { url: 'https://vimeo.com/76979871' } } },
@@ -144,7 +144,7 @@ function resolveEmbed(url: string): EmbedInfo | null {
 
 // Rows of embeds, 480 px wide, above the grid.
 function placeEmbeds(board: Corkboard): void {
-  const b = board.bounds();
+  const b = board.bounds() ?? { x0: 0, y0: 0, x1: 0, y1: 0 };
   const gap = 28;
   const perRow = 4;
   const ids = board.add(EMBEDS.map((init) => ({ ...init, x: 0, y: 0, w: EMBED_W })));
@@ -318,36 +318,31 @@ function startStats(board: Corkboard): void {
   let lastRaf = 0;
   let lastT = performance.now();
   setInterval(() => {
-    const s = board.stats() as Record<string, number | number[] | Record<string, number>>;
+    const s = board.stats();
     const now = performance.now();
-    const raf = s.rafCalls as number;
+    const raf = s.render.rafCalls;
     const perSec = Math.round(((raf - lastRaf) / (now - lastT)) * 1000);
     lastRaf = raf;
     lastT = now;
-    const lv = s.levelsMounted as number[];
     stat('cards', String(board.size));
     stat('mounted', String(s.mounted));
-    stat('zoom', `${Math.round((s.scale as number) * 100)}%`);
+    stat('zoom', `${Math.round(s.scale * 100)}%`);
     stat('raf', String(perSec));
-    stat('tick', `${(s.tickMs as Record<string, number>).p95} ms`);
-    stat('textures', `${Math.round((s.textureBytes as number) / 1048576)} MB`);
-    stat('lod', lv.join('/'));
+    stat('tick', `${s.render.tickMs?.p95 ?? 0} ms`);
+    stat('textures', `${Math.round(s.textures.bytes / 1048576)} MB`);
+    stat('lod', s.textures.levelsMounted.join('/'));
     // Clips playing / the cap the frame rate allows now (it drops while the page runs slow).
-    const videoCap = board.videoBudget;
-    stat('playing', `${board.playing.size}/${Number.isFinite(videoCap) ? videoCap : '∞'}`);
-    const max = board.embeds.maxLive;
-    stat(
-      'embeds',
-      `${board.embeds.live.size}/${Number.isFinite(max) ? max : '∞'}${board.embeds.interacting ? ' · interacting' : ''}`,
-    );
-    stat('parked', String(board.embeds.parked.size));
-    stat('culled', String(board.embeds.culled.size));
-    stat('frozen', String(board.embeds.frozen.size));
-    stat('freeze', `${Math.round(board.embeds.freezeThreshold)} px`);
-    const budget = board.embeds.animatingBudget;
-    stat('animating', `${board.embeds.animating.size}/${Number.isFinite(budget) ? budget : '∞'}`);
-    stat('loading', String(board.embeds.loading.size));
-    stat('previews', String(board.embeds.previewsPending));
+    const inf = (n: number): string => (Number.isFinite(n) ? String(n) : '∞');
+    stat('playing', `${s.video.playing}/${inf(s.video.budget)}`);
+    const e = s.embeds;
+    stat('embeds', `${e.active}/${inf(e.maxLive)}${e.interacting ? ' · interacting' : ''}`);
+    stat('parked', String(e.parked));
+    stat('culled', String(e.culled));
+    stat('frozen', String(e.frozen));
+    stat('freeze', `${Math.round(e.freezeThreshold)} px`);
+    stat('animating', `${e.animating}/${inf(e.animatingBudget)}`);
+    stat('loading', String(e.loading));
+    stat('previews', String(e.previewsPending));
     stat('selected', String(board.selection.length));
     const state = perSec > 0 ? 'rendering' : 'idle';
     $('stats-state').dataset.state = state;
@@ -407,7 +402,7 @@ async function main(): Promise<void> {
   placeEmbeds(board);
   board.camera.fit(undefined, { animate: false });
 
-  const targets = (): readonly string[] | undefined => board.arrangeTargets;
+  const targets = (): readonly string[] | undefined => board.selection.length >= 2 ? board.selection : undefined;
   const cols = (): number => columnsFor(targets()?.length ?? board.size);
   const need = (n: number): boolean => {
     if (board.selection.length >= n) return true;
@@ -446,9 +441,9 @@ async function main(): Promise<void> {
     closePopovers();
   };
   $('add-windows').onclick = () => {
-    const b = board.bounds();
+    const b = board.bounds() ?? { x0: 0, y0: 0, x1: 0, y1: 0 };
     const ids = addWindows(board, WINDOWS_BUTTON, b.x0, b.y1 + 200);
-    board.setEmbeds(WINDOWS_OPTIONS);
+    board.embeds.setOptions(WINDOWS_OPTIONS);
     showWindowsSettings();
     board.camera.fit(ids, { padding: 80 });
     toast(`${WINDOWS_BUTTON} windows added, autoplay on, no live cap. Zoom out slowly if it feels heavy.`);
@@ -460,12 +455,12 @@ async function main(): Promise<void> {
     board.setSnapping({ grid: (e.target as HTMLInputElement).checked });
   $<HTMLInputElement>('dots').onchange = (e) =>
     board.setGrid((e.target as HTMLInputElement).checked);
-  onRadio<VideoMode>('video', (mode) => board.setVideo({ mode }));
-  onRadio<Exclude<EmbedResolution, number>>('resolution', (resolution) => board.setEmbeds({ resolution }));
+  onRadio<VideoMode>('video', (mode) => board.video.setOptions({ mode }));
+  onRadio<Exclude<EmbedResolution, number>>('resolution', (resolution) => board.embeds.setOptions({ resolution }));
   // In view: any card on screen (the default). Large: the old 320 x 200 px at zoom >= 0.25. Selected: only
   // the selected card. Parked frames (live once, now small) are not affected.
   onRadio<'view' | 'large' | 'selected'>('golive', (v) =>
-    board.setEmbeds(
+    board.embeds.setOptions(
       v === 'view'
         ? { minLivePx: 0, minLiveScale: 0 }
         : v === 'large'
@@ -476,18 +471,18 @@ async function main(): Promise<void> {
   // Touch gets a quarter of it; parked frames may double it. All: no cap, touch included.
   onRadio<string>('maxlive', (v) => {
     if (v === 'all') {
-      board.setEmbeds(NO_CAP);
+      board.embeds.setOptions(NO_CAP);
       return;
     }
     const n = Number(v);
     const touch = Math.max(1, Math.round(n / 4));
-    board.setEmbeds({ maxLive: n, maxLiveTouch: touch, maxMounted: n * 2, maxMountedTouch: touch * 2 });
+    board.embeds.setOptions({ maxLive: n, maxLiveTouch: touch, maxMounted: n * 2, maxMountedTouch: touch * 2 });
   });
   $<HTMLInputElement>('autoplay').onchange = (e) =>
-    board.setEmbeds({ autoplay: (e.target as HTMLInputElement).checked });
+    board.embeds.setOptions({ autoplay: (e.target as HTMLInputElement).checked });
   // Lowers how many frames animate while the page is slow, and raises it back when it is smooth.
   $<HTMLInputElement>('adaptive').onchange = (e) =>
-    board.setEmbeds({ adaptive: (e.target as HTMLInputElement).checked });
+    board.embeds.setOptions({ adaptive: (e.target as HTMLInputElement).checked });
   // The body background follows the `--bg` token, which is the canvas colour of each theme.
   let dark = true;
   $('theme').onclick = () => {

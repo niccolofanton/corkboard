@@ -1,7 +1,7 @@
 // The "1000 windows" board: many different cards, generated from a seeded generator so a reload shows the same
 // board. ~45% small self-contained HTML snippets (they animate on their own, no network), ~6% YouTube videos,
 // ~4% Wikipedia articles, ~35% pictures and ~10% video clips.
-import type { ElementInit } from '@niccolofanton/corkboard';
+import type { CardInit } from '@niccolofanton/corkboard';
 
 // What a template is parameterised with.
 interface Params {
@@ -245,7 +245,7 @@ const MIX = { snippet: 0.45, youtube: 0.51, wiki: 0.55, image: 0.9 }; // cumulat
 
 // One live HTML window: a random template with its own palette, speed and text. No poster: the layer draws
 // a tile from the title until it goes live.
-export function makeSnippet(rand: () => number, n: number, label: string): ElementInit {
+export function makeSnippet(rand: () => number, n: number, label: string): CardInit {
   const hue = Math.floor(rand() * 360);
   const p: Params = {
     n,
@@ -260,8 +260,8 @@ export function makeSnippet(rand: () => number, n: number, label: string): Eleme
   return { media: { embed: { html, title: label }, aspect: pick(rand, ASPECTS) }, aspectLocked: false };
 }
 
-export function makeWindows(n: number, rand: () => number, start = 0): ElementInit[] {
-  const out: ElementInit[] = [];
+export function makeWindows(n: number, rand: () => number, start = 0): CardInit[] {
+  const out: CardInit[] = [];
   // Walk the lists in a shuffled order so the same video or article is as far apart as it can be.
   let yt = Math.floor(rand() * YOUTUBE_IDS.length);
   let wiki = Math.floor(rand() * WIKI_TITLES.length);
@@ -290,7 +290,7 @@ export function makeWindows(n: number, rand: () => number, start = 0): ElementIn
 // A masonry of columns, 24 px apart, from (x0, y0) to the right and down. Each column has one width (360 to
 // 480 px) and each card goes to the shortest column. The rows below (embeds, video) stay out of the way: the
 // caller passes the origin.
-export function placeWindows(inits: ElementInit[], x0: number, y0: number, rand: () => number): ElementInit[] {
+export function placeWindows(inits: CardInit[], x0: number, y0: number, rand: () => number): CardInit[] {
   const GAP = 24;
   const cols = Math.max(2, Math.round(Math.sqrt((inits.length * 1.6) / 0.85)));
   const widths = Array.from({ length: cols }, () => 360 + Math.round(rand() * 120));

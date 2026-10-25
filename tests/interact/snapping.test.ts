@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boxUnion, type Box } from '../../src/interact/geometry';
+import { boxUnion, type Aabb } from '../../src/interact/geometry';
 import {
   SNAP_RELEASE,
   SNAP_THRESHOLD_PX,
@@ -12,7 +12,7 @@ import {
   type SnapResult,
 } from '../../src/interact/snapping';
 
-const box = (x: number, y: number, w: number, h: number): Box => ({
+const box = (x: number, y: number, w: number, h: number): Aabb => ({
   minX: x,
   minY: y,
   maxX: x + w,
@@ -263,7 +263,7 @@ describe('snapResize', () => {
   const idx = buildSnapIndex([cand('R', 400, 400, 100, 100)]);
 
   it('a corner drag snaps the dragged edges only', () => {
-    // Box 100..397 x 100..303. Dragging bottom-right: the right edge is 3 short of 400, the left
+    // Aabb 100..397 x 100..303. Dragging bottom-right: the right edge is 3 short of 400, the left
     // edge (100) is nowhere near a line. The bottom edge (303) is not near 400 either.
     const r = snapResize(idx, box(100, 100, 297, 203), { right: true, bottom: true }, T, EXT);
     expect(r.dx).toBe(3);
@@ -814,7 +814,7 @@ describe('performance', () => {
     const idx = buildSnapIndex(field);
     const out: SnapResult = { dx: 0, dy: 0, guides: [] };
     const calls = 5000;
-    const sweep = (i: number): Box => {
+    const sweep = (i: number): Aabb => {
       const t = i / calls;
       return box(t * 9000, 3500 + Math.sin(t * 40) * 3200, 248, 180);
     };
@@ -887,7 +887,7 @@ describe('performance', () => {
     const out: SnapResult = { dx: 0, dy: 0, guides: [] };
     const rnd = lcg(777);
     const moves = 2000;
-    const boxes: Box[] = [];
+    const boxes: Aabb[] = [];
     for (let i = 0; i < moves + 200; i++) {
       boxes.push(box(rnd() * 2800, rnd() * 2200, 80 + rnd() * 80, 60 + rnd() * 60));
     }
@@ -917,7 +917,7 @@ describe('performance', () => {
     const out: SnapResult = { dx: 0, dy: 0, guides: [] };
     const rnd = lcg(4242);
     const moves = 2000;
-    const boxes: Box[] = [];
+    const boxes: Aabb[] = [];
     for (let i = 0; i < moves + 200; i++) {
       boxes.push(box(rnd() * 2800, rnd() * 2200, 80 + rnd() * 80, 60 + rnd() * 60));
     }
@@ -1026,7 +1026,7 @@ describe('threshold in screen pixels', () => {
 describe('hysteresis', () => {
   // A's left edge: x = 100 (its other lines, 150 and 200, are far from a 10 px box near 100).
   const idx = buildSnapIndex([A]);
-  const at = (minX: number): Box => box(minX, 1000, 10, 10);
+  const at = (minX: number): Aabb => box(minX, 1000, 10, 10);
 
   it('holds a target past the threshold until the release distance', () => {
     const out: SnapResult = { dx: 0, dy: 0, guides: [] };
@@ -1046,7 +1046,7 @@ describe('hysteresis', () => {
     // Two left edges 8 apart: 100 (P) and 108 (Q). P and Q are wide and the box is 300 wide, so
     // only the box's left edge is ever near a line.
     const two = buildSnapIndex([cand('P', 100, 300, 1000, 50), cand('Q', 108, 600, 1000, 50)]);
-    const wide = (minX: number): Box => box(minX, 1000, 300, 10);
+    const wide = (minX: number): Aabb => box(minX, 1000, 300, 10);
     const out: SnapResult = { dx: 0, dy: 0, guides: [] };
     expect(snapMove(two, wide(101), T, EXT, out).dx).toBe(-1); // on 100
     // At 104.5 the box is 4.5 from 100 and 3.5 from 108: the held target stays.

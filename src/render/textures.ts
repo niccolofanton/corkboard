@@ -33,6 +33,7 @@ const RETRY_AFTER_MS = 30_000;
 export const FAR_DIST = 1e6;
 const L1_PAGE_BYTES = L1_SPEC.pageSize ** 2 * 4 * MIP_FACTOR;
 
+/** Options of the texture manager. */
 export interface TextureManagerOptions {
   budgetBytes: number;
   workers: number;
@@ -49,6 +50,17 @@ export interface TextureManagerOptions {
   onRetire?: () => void;
   // The decoded pixels are always uploaded premultiplied (see uploadCell).
   onWake: () => void;
+  // A picture that would not load, or the end of the decode workers. The stage turns the card slot into
+  // an element id and hands it to the host.
+  onError?: (e: TextureError) => void;
+}
+
+/** A texture failure, as the texture manager reports it. */
+export interface TextureError {
+  kind: 'texture' | 'worker';
+  slot?: number;
+  url?: string;
+  cause: unknown;
 }
 
 interface Page {
@@ -102,6 +114,7 @@ interface Decoded {
   decodeMs: number;
 }
 
+/** A texture the stage asks the manager for. */
 export interface WantedItem {
   card: BoardCard;
   level: Level;
@@ -111,14 +124,46 @@ export interface WantedItem {
   bucket?: number;
 }
 
-// Pixi internals the partial upload leans on (all present in 8.22; the peer range in package.json starts there).
+// The texture system as the partial upload sees it. `getGlSource`, `initSource`, `bind` and `unbind` are public Pixi API;
+// the three underscored members are Pixi internals (all present in 8.22; the peer range in package.json starts
+// there), so they are optional here and feature-detected (see `hasPrivateUpload`).
 interface GlTextureSystemInternals {
   getGlSource(source: TextureSource): { target: number; texture: WebGLTexture };
   initSource(source: TextureSource): void;
-  _premultiplyAlpha: boolean;
-  _activateLocation(location: number): void;
-  _setBoundTexture(location: number, source: TextureSource | null): void;
+  bind(texture: TextureSource, location?: number): void;
+  unbind(texture: TextureSource): void;
+  _premultiplyAlpha?: boolean;
+  _activateLocation?(location: number): void;
+  _setBoundTexture?(location: number, source: TextureSource | null): void;
 }
+
+// Replaced at build time (vite `define`): true only in the e2e build and under vitest. In the library build it is
+// the literal `false`, so the test hook below is dead code and does not reach `dist`.
+declare const __CORKBOARD_TEST__: boolean;
+
+// Whether the Pixi private members the fast upload path leans on exist with the expected types. When a Pixi
+// minor renames them the manager falls back to the public path (see `bindPage`/`uploadCell`) instead of throwing.
+export function hasPrivateUpload(sys: unknown): boolean {
+  // Test hook: `globalThis.__corkboardForcePublicUpload = true` before creating a board forces the public upload
+  // path (the e2e suite uses it to prove the fallback renders on the Pixi version under test). A local cast: no
+  // global is declared, so nothing of it reaches the published types.
+  if (
+    typeof __CORKBOARD_TEST__ !== 'undefined' &&
+    __CORKBOARD_TEST__ &&
+    (globalThis as { __corkboardForcePublicUpload?: boolean }).__corkboardForcePublicUpload
+  ) {
+    return false;
+  }
+  const s = sys as Partial<GlTextureSystemInternals> | null;
+  return (
+    !!s &&
+    typeof s._activateLocation === 'function' &&
+    typeof s._setBoundTexture === 'function' &&
+    typeof s._premultiplyAlpha === 'boolean'
+  );
+}
+
+let warnedPublicUpload = false;
 
 // The worker is started from a blob URL, where a relative URL (`/img/a.jpg`, `a.jpg`) has no base to resolve
 // against: make it absolute against the page here.
@@ -141,11 +186,21 @@ function clearBuffer(bytes: number): Uint8Array {
 }
 const isOwn = (level: Level): level is 2 | 3 => level >= 2;
 
+/** Decodes pictures in workers and keeps them in atlases and own textures within a memory budget. */
 export class TextureManager {
   private readonly texSys: GlTextureSystemInternals;
+  // True: bind and premultiply through Pixi's private members (no redundant GL calls). False: the public
+  // `texture.bind` and a read-and-restore of the GL pixel-store flag (see `bindPage`/`uploadCell`).
+  private readonly privateUpload: boolean;
   private readonly gl: WebGL2RenderingContext;
   private readonly workers: Worker[] = [];
   private readonly workerLoad: number[] = [];
+  // Workers whose script died (`error`): never sent to again. With none alive nothing can be decoded.
+  private readonly workerDead: boolean[] = [];
+  private liveWorkers = 0;
+  private disposed = false;
+  // Failures already reported, per card slot: "slot|url". A retry that fails again stays quiet.
+  private readonly reported = new Map<number, Set<string>>();
   private atlas0: Atlas<Page>;
   private atlas1: Atlas<Page>;
   private readonly cards = new Map<number, CardTex>();
@@ -192,11 +247,24 @@ export class TextureManager {
   ) {
     this.texSys = renderer.texture as unknown as GlTextureSystemInternals;
     this.gl = (renderer as unknown as { gl: WebGL2RenderingContext }).gl;
+    this.privateUpload = hasPrivateUpload(this.texSys);
+    if (!this.privateUpload && !warnedPublicUpload) {
+      warnedPublicUpload = true;
+      console.warn(
+        'corkboard: the Pixi texture system lacks the internals the fast upload path uses; falling back to the public (slower) path.',
+      );
+    }
     this.retire = new RetireQueue(opts.retireDelay ?? 2);
     this.border = opts.border ?? '';
     this.atlas0 = this.makeAtlas0();
     this.atlas1 = this.makeAtlas1();
-    this.spawnWorkers(opts.workers);
+    try {
+      this.spawnWorkers(opts.workers);
+    } catch (e) {
+      // A bad `workerUrl` throws from `new Worker`: let go of the ones that did start.
+      for (const w of this.workers) w.terminate();
+      throw e;
+    }
   }
 
   private makeAtlas0(): Atlas<Page> {
@@ -222,10 +290,43 @@ export class TextureManager {
         ? new Worker(this.opts.workerUrl, { type: 'module' })
         : new DecodeWorker();
       w.onmessage = (e: MessageEvent<WorkerOut>) => this.onWorker(i, e.data);
-      w.onerror = (e) => console.error('[corkboard] decode worker error', e.message);
+      w.onerror = (e) => this.onWorkerError(i, e);
       this.workers.push(w);
       this.workerLoad.push(0);
+      this.workerDead.push(false);
+      this.liveWorkers++;
     }
+  }
+
+  // A worker died. Its in-flight jobs go back in the queue for the others; with none left they all fail
+  // (the cards keep their placeholders) and nothing is dispatched again.
+  private onWorkerError(wi: number, cause: unknown): void {
+    if (this.disposed || this.workerDead[wi]) return;
+    this.workerDead[wi] = true;
+    this.liveWorkers--;
+    this.workers[wi].terminate();
+    this.workerLoad[wi] = 0;
+    for (const req of [...this.reqs.values()]) {
+      if (!req.inflight || req.worker !== wi) continue;
+      this.inflight = Math.max(0, this.inflight - 1);
+      if (req.cancelled) {
+        this.reqs.delete(req.rid);
+        continue;
+      }
+      req.inflight = false;
+      req.worker = -1;
+      this.queue.push(req);
+    }
+    if (this.liveWorkers > 0) {
+      this.pump();
+    } else {
+      for (const r of this.reqs.values()) r.cancelled = true;
+      this.reqs.clear();
+      this.reqByKey.clear();
+      this.queue = [];
+      this.inflight = 0;
+    }
+    this.opts.onError?.({ kind: 'worker', cause });
   }
 
   // ── Queries ────────────────────────────────────────────────────────────────
@@ -233,7 +334,7 @@ export class TextureManager {
     return this.pageBytes + this.ownBytes;
   }
   get workerCount(): number {
-    return this.workers.length;
+    return this.liveWorkers;
   }
   get pendingWork(): boolean {
     return this.decoded.length > 0;
@@ -358,6 +459,8 @@ export class TextureManager {
   // Replaces the wanted set: new items are queued, queued items no longer wanted are dropped and
   // in-flight ones are cancelled.
   setWanted(items: WantedItem[], now = performance.now()): void {
+    // No worker left: nothing could ever be decoded, and queueing would only pile up.
+    if (this.liveWorkers === 0 && this.workers.length > 0) return;
     const wanted = new Set<number>();
     for (const it of items) {
       const k = key(it.card, it.level);
@@ -422,7 +525,7 @@ export class TextureManager {
   }
 
   private pump(): void {
-    const cap = this.workers.length * INFLIGHT_PER_WORKER;
+    const cap = this.liveWorkers * INFLIGHT_PER_WORKER;
     if (this.inflight >= cap || this.queue.length === 0) return;
     // On-screen cards first; among them the lower level first (cheap, gives a first paint), then the
     // nearest to the viewport centre. After a context loss this restores the view in viewport order.
@@ -435,9 +538,10 @@ export class TextureManager {
     while (this.inflight < cap && this.queue.length > 0) {
       const req = this.queue.shift() as Req;
       // Least-loaded worker.
-      let wi = 0;
-      for (let i = 1; i < this.workers.length; i++) {
-        if (this.workerLoad[i] < this.workerLoad[wi]) wi = i;
+      let wi = -1;
+      for (let i = 0; i < this.workers.length; i++) {
+        if (this.workerDead[i]) continue;
+        if (wi < 0 || this.workerLoad[i] < this.workerLoad[wi]) wi = i;
       }
       req.inflight = true;
       req.worker = wi;
@@ -476,8 +580,10 @@ export class TextureManager {
     if (m.op === 'fail') {
       if (!m.aborted) {
         this.stats.failed++;
-        if (req) this.failedAt.set(key(req.card, req.level), performance.now());
-        console.warn('[corkboard] decode failed', m.reason);
+        if (req) {
+          this.failedAt.set(key(req.card, req.level), performance.now());
+          this.reportTexture(req, m.reason);
+        }
       }
       this.pump();
       return;
@@ -501,6 +607,18 @@ export class TextureManager {
     this.decodedKeys.add(key(req.card, req.level));
     this.pump();
     this.opts.onWake();
+  }
+
+  // One `texture` error per card and URL: the retry that follows RETRY_AFTER_MS must not repeat it.
+  private reportTexture(req: Req, reason: string): void {
+    // L0 is decoded from the ThumbHash, there is no URL to blame.
+    const url = this.urlOf(req.card, req.level);
+    const tag = `${req.level}|${url ?? ''}`;
+    let seen = this.reported.get(req.card.id);
+    if (seen?.has(tag)) return;
+    if (!seen) this.reported.set(req.card.id, (seen = new Set()));
+    seen.add(tag);
+    this.opts.onError?.({ kind: 'texture', slot: req.card.id, url, cause: new Error(reason) });
   }
 
   // ── Uploads (called once per frame, before render) ─────────────────────────
@@ -647,6 +765,7 @@ export class TextureManager {
       }
       this.failedAt.delete(k);
     }
+    this.reported.delete(id);
     // Bitmaps of this card that are decoded but not uploaded yet (a card with nothing resident has them too).
     this.decoded = this.decoded.filter((d) => {
       if (d.req.card.id !== id) return true;
@@ -688,6 +807,8 @@ export class TextureManager {
       }
       this.failedAt.delete(k);
     }
+    // New pictures have new URLs, but a failure of the same URL after a swap back deserves a new report.
+    this.reported.delete(id);
     this.decoded = this.decoded.filter((d) => {
       if (d.req.card.id !== id || d.req.level === 0) return true;
       d.bitmap.close();
@@ -783,9 +904,19 @@ export class TextureManager {
     const gl = this.gl;
     const sys = this.texSys;
     const glTex = sys.getGlSource(p.source);
-    sys._activateLocation(0);
-    gl.bindTexture(glTex.target, glTex.texture);
-    sys._setBoundTexture(0, p.source);
+    if (this.privateUpload) {
+      // Always rebinds on the raw GL context (other code may have changed the binding behind Pixi's cache).
+      sys._activateLocation!(0);
+      gl.bindTexture(glTex.target, glTex.texture);
+      sys._setBoundTexture!(0, p.source);
+    } else {
+      // Public: Pixi keeps its own bound-texture cache in step. `bind` alone is not enough: when its cache says
+      // unit 0 already holds the page it skips `activeTexture(0)`, and after a batch that used units 0 and 1 the
+      // active unit is 1, so the upload below would land in whatever texture the batch left on unit 1. Dropping the
+      // page from the cache first makes `bind` a miss, which always activates unit 0 and binds the page there.
+      sys.unbind(p.source);
+      sys.bind(p.source, 0);
+    }
     return glTex;
   }
 
@@ -801,9 +932,17 @@ export class TextureManager {
     const { x, y } = cell;
     const glTex = this.bindPage(cell.page);
     // Canvas-born bitmaps are premultiplied, so upload them as such: no conversion, no fringes.
-    if (!this.texSys._premultiplyAlpha) {
+    let restorePremultiply = false;
+    if (this.privateUpload) {
+      if (!this.texSys._premultiplyAlpha) {
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+        this.texSys._premultiplyAlpha = true;
+      }
+    } else if (!gl.getParameter(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL)) {
+      // Pixi's cached copy of the flag is out of reach: flip the real flag for this upload only and put it back,
+      // so Pixi's own uploads keep seeing the state it believes in.
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
-      this.texSys._premultiplyAlpha = true;
+      restorePremultiply = true;
     }
     // A recycled cell still holds its last occupant: a smaller bitmap leaves that picture in the rest of the
     // cell, where the bilinear taps and the mips at the edge of the frame would read it. Clear the rest
@@ -818,6 +957,7 @@ export class TextureManager {
       }
     }
     gl.texSubImage2D(glTex.target, 0, x, y, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+    if (restorePremultiply) gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
   }
 
   private flushMips(p: Page): void {
@@ -901,7 +1041,7 @@ export class TextureManager {
   // the stage re-requests what is on screen (from the HTTP cache) in viewport order.
   reset(): void {
     for (const r of this.reqs.values()) {
-      if (r.inflight) this.workers[r.worker].postMessage({ op: 'cancel', rid: r.rid } as WorkerIn);
+      if (r.inflight && !this.workerDead[r.worker]) this.workers[r.worker].postMessage({ op: 'cancel', rid: r.rid } as WorkerIn);
     }
     this.reqs.clear();
     this.reqByKey.clear();
@@ -938,6 +1078,7 @@ export class TextureManager {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.reset();
     this.retire.flushAll();
     for (const w of this.workers) w.terminate();

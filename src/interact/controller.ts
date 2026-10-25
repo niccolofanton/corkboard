@@ -8,15 +8,18 @@
 //   drag a handle      resizes (aspect-locked cards keep their ratio; Alt resizes about the centre)
 //   keys               Delete removes, Esc clears, Cmd/Ctrl+A selects all, arrows nudge, 0 fits, 1 = 100 %
 //
-// During a gesture the cards are drawn at a preview rect by the stage (nothing is written to the store);
-// the store is updated once on release. No undo, no history.
+// During a gesture the cards are drawn at a preview rect by the stage (nothing is written to the store, and a
+// dragged card is only drawn on top: `store.lift`); the store is updated once on release, the move and the
+// bring-to-front in one batch, so a gesture is one `change` event. No undo, no history.
+import { assertGeometry } from '../check';
 import { Emitter } from '../events';
 import type { SelectionVisual } from '../render/overlay';
 import type { Stage } from '../render/stage';
 import { GRID } from '../render/stage';
 import type { Store } from '../store';
-import type { Element, ElementId } from '../types';
-import type { Box, WorldRect } from './geometry';
+import type { Box } from '../math';
+import type { Card, CardId } from '../types';
+import type { Aabb, WorldRect } from './geometry';
 import { boxUnion, worldRectOf } from './geometry';
 import type { Guide } from './snapping';
 import { geometryBox, handleAt, selectionHandles, type HandleId, type SelectionHandles } from './handles';
@@ -26,44 +29,76 @@ import { outlineOf, type OutlineRect } from './outline';
 import { ResizeSession, type Mods } from './resize';
 import { SnapSession, type SnapSettings } from './snap';
 
+/**
+ * Options of the pointer, touch and keyboard layer (`CorkboardOptions.interaction`). Wheel and pinch always pan
+ * and zoom.
+ */
 export interface InteractionOptions {
-  // Selecting, moving and resizing cards (default true). With false the layer only pans and zooms.
+  /** Selecting, moving and resizing cards (default true). With false the layer only pans and zooms. */
   select?: boolean;
-  // What dragging the empty canvas does (default 'pan'); Shift does the other one.
+  /** What dragging the empty canvas does (default 'pan'); Shift does the other one. */
   emptyDrag?: 'pan' | 'marquee';
-  // Keyboard shortcuts on the focused board (default true).
+  /**
+   * Keyboard shortcuts on the focused board.
+   * @default true
+   */
   keyboard?: boolean;
-  // Dragging and resizing write to the store on release, arrow keys on each press (default true). With
-  // false the layer only emits 'transform' with the proposed rects and leaves the cards where they are.
+  /**
+   * Dragging, resizing, nudging and Delete write to the store (on release, on each key press) - one `change`
+   * event per gesture, `source: 'user'` (default true). With false the layer NEVER writes: it emits `transform`
+   * (the proposed rects and, for a drag, the cards to bring to the front) and `delete` (the ids) as proposals and
+   * leaves the cards where they are, for a host that owns the state and applies them itself (controlled mode).
+   * A card being dragged is still drawn on top until the release.
+   */
   commit?: boolean;
-  // Rubber-band selection (default true). With false a drag on the empty canvas always pans, Shift or not.
+  /** Rubber-band selection (default true). With false a drag on the empty canvas always pans, Shift or not. */
   marquee?: boolean;
-  // A drag on the empty canvas pans without clearing the selection first; a click that does not move still
-  // clears it (default false: the selection is cleared as soon as the pointer goes down on empty canvas).
+  /**
+   * A drag on the empty canvas pans without clearing the selection first; a click that does not move still
+   * clears it (default false: the selection is cleared as soon as the pointer goes down on empty canvas).
+   */
   keepSelectionOnPan?: boolean;
-  // Draw the selection outline and the resize handles on the canvas (default true). With false the layer
-  // still selects, moves and resizes (the handles keep their hit areas) but draws no selection: the host
-  // draws its own. The hover outline is not part of it.
+  /**
+   * Draw the selection outline and the resize handles on the canvas (default true). With false the layer
+   * still selects, moves and resizes (the handles keep their hit areas) but draws no selection: the host
+   * draws its own. The hover outline is not part of it.
+   */
   selectionOutline?: boolean;
 }
 
+/** The events of the interaction layer; the board re-emits them (see `CorkboardEvents`). Points are in world coordinates. */
 export interface InteractionEvents {
-  selection: { ids: readonly ElementId[] };
-  hover: { id: ElementId | null };
-  click: { id: ElementId | null; shift: boolean; x: number; y: number };
-  dblclick: { id: ElementId | null; x: number; y: number };
-  // A drag or resize ended: the new rect of every card it touched (already written to the store unless
-  // `commit` is false).
+  /** The selection changed: the selected ids now. */
+  selection: { ids: readonly CardId[] };
+  /** The card under the pointer changed (`null`: none). Touch has no hover. */
+  hover: { id: CardId | null };
+  /** A click (or tap): the card hit (`null`: the empty canvas), whether Shift was held, and the point in world coordinates. */
+  click: { id: CardId | null; shift: boolean; x: number; y: number };
+  /** A double click (or double tap): the card hit (`null`: the empty canvas) and the point in world coordinates. */
+  dblclick: { id: CardId | null; x: number; y: number };
+  /**
+   * A drag, resize or arrow-key nudge ended: the new {@link Box} of every card it touched, in world px (already
+   * written to the store, in one `change` event, unless `commit` is false: then it is a proposal).
+   */
   transform: {
     kind: 'move' | 'resize';
-    rects: ReadonlyMap<ElementId, { x: number; y: number; w: number; h: number }>;
+    rects: ReadonlyMap<CardId, Box>;
+    /**
+     * Set by a pointer drag: the cards it holds, bottom of the draw order first, which a drag brings to the front.
+     * Already done when `commit` is on (it is part of the same `change`); with `commit: false` it is the proposal:
+     * `board.bringToFront(toFront)`.
+     */
+    toFront?: readonly CardId[];
   };
-  // A gesture started / ended ('pan' | 'marquee' | 'drag' | 'resize' | 'pinch'; null when it ended).
+  /** A gesture started or ended: its kind, or `null` when it ended. */
   gesture: { kind: 'pan' | 'marquee' | 'drag' | 'resize' | 'pinch' | null };
-  // The pointer device changed between touch and mouse / pen (touch has no hover).
+  /** The pointer device changed between touch and mouse / pen (`touch: true`: touch). */
   touch: { touch: boolean };
-  // Delete pressed with a selection: the ids that were removed.
-  delete: { ids: readonly ElementId[] };
+  /**
+   * Delete was pressed with a selection: the ids (locked cards excluded). With `commit` on they were removed
+   * just before this fires; with `commit: false` nothing was, it is a proposal.
+   */
+  delete: { ids: readonly CardId[] };
 }
 
 const DRAG_THRESHOLD_PX = 3;
@@ -82,12 +117,12 @@ type Gesture =
       sy: number;
       x: number;
       y: number;
-      base: readonly ElementId[];
+      base: readonly CardId[];
       additive: boolean;
     }
   | {
       kind: 'press';
-      id: ElementId;
+      id: CardId;
       x: number;
       y: number;
       shift: boolean;
@@ -95,25 +130,28 @@ type Gesture =
     }
   | {
       kind: 'drag';
-      ids: readonly ElementId[];
+      ids: readonly CardId[];
       start: { x: number; y: number };
-      rects: Map<ElementId, WorldRect>;
-      box: Box;
+      rects: Map<CardId, WorldRect>;
+      box: Aabb;
       snap: SnapSession;
       moved: boolean;
     }
   | { kind: 'resize'; session: ResizeSession; snap: SnapSession; handle: HandleId };
 
+/** The pointer, touch and keyboard layer of a board. The board owns one; reach it with `getInternals`. */
 export class Interaction {
   readonly events = new Emitter<InteractionEvents>();
-  selection: readonly ElementId[] = [];
+  selection: readonly CardId[] = [];
   readonly snapping: SnapSettings;
 
   private readonly opts: Required<InteractionOptions>;
+  // Options set while a gesture runs, applied at the next pointer down.
+  private pendingOpts: Partial<InteractionOptions> | null = null;
   private gesture: Gesture | null = null;
   private readonly pointers = new Map<number, { x: number; y: number }>();
   private pointerType = 'mouse';
-  private hoverId: ElementId | null = null;
+  private hoverId: CardId | null = null;
   private selDirty = true;
   private spaceDown = false;
   // A host-driven hand tool (`setPanMode`): like holding Space.
@@ -150,6 +188,9 @@ export class Interaction {
         if (e.type !== 'change') return;
         const gone = e.change.removed;
         if (gone.length > 0) this.dropRemoved(new Set(gone.map((g) => g.id)));
+        // `loadSnapshot` replaced the board: what a gesture held (even a card that kept its id) is not what it
+        // started from, and releasing would write its position over the loaded one.
+        if (e.change.reload) this.cancelGesture();
         this.selDirty = true;
         this.stage.requestFrame();
       }),
@@ -158,7 +199,7 @@ export class Interaction {
   }
 
   // ── Selection ──────────────────────────────────────────────────────────────
-  setSelection(ids: readonly ElementId[]): void {
+  setSelection(ids: readonly CardId[]): void {
     const next = ids.filter((id, i) => this.store.has(id) && ids.indexOf(id) === i);
     const same =
       next.length === this.selection.length && next.every((id, i) => id === this.selection[i]);
@@ -166,6 +207,25 @@ export class Interaction {
     this.selection = next;
     this.selDirty = true;
     this.events.emit('selection', { ids: next });
+    this.stage.requestFrame();
+  }
+
+  // Changes the options. A running gesture reads them again on release (`commit`, say), so while one is going
+  // (or a pointer is down) the change waits for the next pointer down.
+  setOptions(o: Partial<InteractionOptions>): void {
+    const next = { ...this.pendingOpts };
+    for (const k of Object.keys(o) as (keyof InteractionOptions)[]) {
+      if (o[k] !== undefined) (next as Record<string, unknown>)[k] = o[k];
+    }
+    this.pendingOpts = next;
+    if (this.gesture === null && this.pointers.size === 0) this.applyOptions();
+  }
+
+  private applyOptions(): void {
+    if (!this.pendingOpts) return;
+    Object.assign(this.opts, this.pendingOpts);
+    this.pendingOpts = null;
+    this.selDirty = true;
     this.stage.requestFrame();
   }
 
@@ -177,7 +237,7 @@ export class Interaction {
   }
 
   // Cards left the store: out of the selection, the hover and the gesture that holds them.
-  private dropRemoved(dead: ReadonlySet<ElementId>): void {
+  private dropRemoved(dead: ReadonlySet<CardId>): void {
     if (this.selection.length > 0) {
       const next = this.selection.filter((id) => !dead.has(id));
       if (next.length !== this.selection.length) this.setSelection(next);
@@ -200,12 +260,12 @@ export class Interaction {
         return;
       }
       g.ids = left;
-      let box: Box | null = null;
+      let box: Aabb | null = null;
       for (const r of g.rects.values()) {
-        const b = geometryBox([r]) as Box;
+        const b = geometryBox([r]) as Aabb;
         box = box ? boxUnion(box, b) : b;
       }
-      g.box = box as Box;
+      g.box = box as Aabb;
     } else if (g?.kind === 'resize') {
       const lost = g.session.affected.filter((id) => dead.has(id));
       if (lost.length === 0) return;
@@ -237,7 +297,7 @@ export class Interaction {
 
   private selectionVisual(showHandles: boolean): SelectionVisual | null {
     this.handlesScale = this.stage.cam.scale;
-    const els: Element[] = [];
+    const els: Card[] = [];
     for (const id of this.selection) {
       const el = this.store.get(id);
       if (el) els.push(el);
@@ -254,7 +314,7 @@ export class Interaction {
         showHandles: showHandles && this.handles !== null,
       };
     }
-    const b = geometryBox(rects) as Box;
+    const b = geometryBox(rects) as Aabb;
     this.handles = selectionHandles(this.store, this.selection, this.stage.cam.scale);
     return {
       frame: { x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY, rot: 0, radius: 0 },
@@ -367,6 +427,8 @@ export class Interaction {
     const p = this.local(e);
     // This pointer is already down: the release of its last press never came. That gesture is over.
     if (this.gesture && this.pointers.has(e.pointerId)) this.cancelGesture();
+    // A change of options asked for during a gesture lands here, before the next one begins.
+    if (this.gesture === null && this.pointers.size === 0) this.applyOptions();
     this.pointers.set(e.pointerId, p);
     this.mods(e);
     this.setHover(null);
@@ -487,7 +549,7 @@ export class Interaction {
       }
       case 'marquee': {
         const w = stage.screenToWorld(p.x, p.y);
-        const box: Box = {
+        const box: Aabb = {
           minX: Math.min(g.sx, w.x),
           minY: Math.min(g.sy, w.y),
           maxX: Math.max(g.sx, w.x),
@@ -524,22 +586,24 @@ export class Interaction {
       this.beginPan(p, { timeStamp: performance.now() } as PointerEvent, false, true);
       return;
     }
-    const rects = new Map<ElementId, WorldRect>();
-    let box: Box | null = null;
+    const rects = new Map<CardId, WorldRect>();
+    let box: Aabb | null = null;
     for (const id of ids) {
-      const el = this.store.get(id) as Element;
+      const el = this.store.get(id) as Card;
       const r = worldRectOf(el);
       rects.set(id, r);
       stage.pin(id, true);
-      const b = geometryBox([r]) as Box;
+      const b = geometryBox([r]) as Aabb;
       box = box ? boxUnion(box, b) : b;
     }
     const snap = new SnapSession(this.snapping, GRID);
     snap.begin(this.store, stage.cam.visibleRect(), stage.cam.scale, new Set(ids));
     const start = stage.screenToWorld(press.x, press.y);
-    this.startGesture({ kind: 'drag', ids, start, rects, box: box as Box, snap, moved: false });
+    this.startGesture({ kind: 'drag', ids, start, rects, box: box as Aabb, snap, moved: false });
     this.host.style.cursor = 'grabbing';
-    this.store.bringToFront(ids);
+    // On top while it is held, with no write: the order is committed with the move on release.
+    this.store.lift(ids);
+    stage.requestFrame();
     this.updateDrag(this.gesture as Extract<Gesture, { kind: 'drag' }>, p, this.lastMods);
   }
 
@@ -554,7 +618,7 @@ export class Interaction {
       else dx = 0;
     }
     g.moved = true;
-    const moved: Box = {
+    const moved: Aabb = {
       minX: g.box.minX + dx,
       minY: g.box.minY + dy,
       maxX: g.box.maxX + dx,
@@ -639,7 +703,7 @@ export class Interaction {
     this.endGesture();
   }
 
-  private emitClick(id: ElementId | null, e: PointerEvent, p: { x: number; y: number }): void {
+  private emitClick(id: CardId | null, e: PointerEvent, p: { x: number; y: number }): void {
     const w = this.stage.screenToWorld(p.x, p.y);
     this.events.emit('click', { id, shift: e.shiftKey, x: w.x, y: w.y });
   }
@@ -660,6 +724,7 @@ export class Interaction {
   }
 
   private cancelDrag(g: Extract<Gesture, { kind: 'drag' }>): void {
+    this.store.lift([]);
     for (const id of g.ids) {
       this.stage.clearPreview(id);
       this.stage.pin(id, false);
@@ -674,24 +739,40 @@ export class Interaction {
   }
 
   // `ids`: every card the gesture held (previewed and pinned), whether or not it ends up in `rects`.
+  // `toFront`: the cards a drag brings to the front, written with the move in the same batch.
   private commit(
     kind: 'move' | 'resize',
-    ids: readonly ElementId[],
-    rects: Map<ElementId, { x: number; y: number; w: number; h: number }>,
+    ids: readonly CardId[],
+    rects: Map<CardId, { x: number; y: number; w: number; h: number }>,
+    toFront?: readonly CardId[],
   ): void {
     const stage = this.stage;
+    // The lift ends here: with `commit`, the real order takes over in the same synchronous step.
+    this.store.lift([]);
+    let failure: unknown;
     if (this.opts.commit) {
-      this.store.batch(() => {
-        for (const [id, r] of rects) {
-          this.store.update(id, { x: r.x, y: r.y, w: r.w, h: r.h });
-        }
-      });
+      try {
+        // All or nothing: every rect is checked before the first one is written.
+        for (const [id, r] of rects) assertGeometry(`${kind}: card "${id}"`, r);
+        this.store.batch(() => {
+          for (const [id, r] of rects) {
+            this.store.update(id, { x: r.x, y: r.y, w: r.w, h: r.h }, 'user');
+          }
+          if (toFront) this.store.bringToFront(toFront, 'user');
+        }, 'user');
+      } catch (err) {
+        failure = err;
+      }
     }
+    // The gesture ends whatever happened: no preview or pin is left behind.
     for (const id of ids) {
       stage.clearPreview(id);
       stage.pin(id, false);
     }
-    if (rects.size > 0) this.events.emit('transform', { kind, rects });
+    if (failure !== undefined) throw failure;
+    if (rects.size > 0) {
+      this.events.emit('transform', toFront ? { kind, rects, toFront } : { kind, rects });
+    }
   }
 
   private commitDrag(g: Extract<Gesture, { kind: 'drag' }>): void {
@@ -699,16 +780,18 @@ export class Interaction {
       this.cancelDrag(g);
       return;
     }
-    const out = new Map<ElementId, { x: number; y: number; w: number; h: number }>();
+    const out = new Map<CardId, { x: number; y: number; w: number; h: number }>();
     for (const id of g.ids) {
       const p = this.stage.previewRectOf(id);
       if (p && this.store.has(id)) out.set(id, { x: round2(p.x), y: round2(p.y), w: p.w, h: p.h });
     }
-    this.commit('move', g.ids, out);
+    // Draw order, bottom first, of the cards that are still there.
+    const toFront = [...out.keys()].sort((a, b) => this.store.rank(a) - this.store.rank(b));
+    this.commit('move', g.ids, out, toFront);
   }
 
   private commitResize(g: Extract<Gesture, { kind: 'resize' }>): void {
-    const out = new Map<ElementId, { x: number; y: number; w: number; h: number }>();
+    const out = new Map<CardId, { x: number; y: number; w: number; h: number }>();
     for (const id of g.session.affected) {
       const p = this.stage.previewRectOf(id);
       if (p && this.store.has(id)) {
@@ -734,13 +817,13 @@ export class Interaction {
     this.setHover(hit ? hit.id : null);
   }
 
-  private setHover(id: ElementId | null): void {
+  private setHover(id: CardId | null): void {
     if (id === this.hoverId) return;
     this.hoverId = id;
     const el = id ? this.store.get(id) : undefined;
     const showOutline = el !== undefined && !this.selection.includes(el.id);
     const r: OutlineRect | null = showOutline
-      ? outlineOf(el as Element, worldRectOf(el as Element))
+      ? outlineOf(el as Card, worldRectOf(el as Card))
       : null;
     this.stage.overlay.setHover(r);
     this.events.emit('hover', { id });
@@ -766,19 +849,20 @@ export class Interaction {
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && this.selection.length > 0) {
       const ids = this.selection.filter((id) => !this.store.get(id)?.locked);
       if (ids.length === 0) return;
-      this.store.remove(ids);
+      // With `commit: false` the host removes the cards itself: it only gets the proposal.
+      if (this.opts.commit) this.store.remove(ids, 'user');
       this.events.emit('delete', { ids });
     } else if (e.key.startsWith('Arrow') && this.selection.length > 0 && !cmd) {
       const step = e.shiftKey ? NUDGE_BIG : NUDGE;
       const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
       const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
-      const rects = new Map<ElementId, { x: number; y: number; w: number; h: number }>();
+      const rects = new Map<CardId, { x: number; y: number; w: number; h: number }>();
       // With `commit: false` the host moves the cards itself: it only gets the proposal.
       this.store.batch(() => {
         for (const id of this.selection) {
           const el = this.store.get(id);
           if (!el || el.locked) continue;
-          if (this.opts.commit) this.store.update(id, { x: el.x + dx, y: el.y + dy });
+          if (this.opts.commit) this.store.update(id, { x: el.x + dx, y: el.y + dy }, 'user');
           rects.set(id, { x: el.x + dx, y: el.y + dy, w: el.w, h: el.h });
         }
       });
@@ -786,7 +870,7 @@ export class Interaction {
     } else if (cmd) {
       return;
     } else if (e.key === '0') {
-      if (this.selection.length > 0) stage.fitRect(stage.contentBounds(this.selection));
+      if (this.selection.length > 0) stage.fitRect(stage.boundsOf(this.selection));
       else if (this.store.size > 0) stage.fit();
     } else if (e.key === '1') {
       stage.zoomToActual();
@@ -801,6 +885,8 @@ export class Interaction {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    // A gesture in progress let go of: the lift, the previews and the pins would outlive this layer.
+    this.cancelGesture();
     for (const f of this.cleanups) f();
     this.events.clear();
   }

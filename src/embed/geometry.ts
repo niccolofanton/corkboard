@@ -9,10 +9,12 @@ import type { Camera } from '../math';
 import type { EmbedResolution } from '../types';
 import { videoPlacement, type VideoRect } from '../video/videoGeometry';
 
+/** The most a page's layout viewport is made wide or tall, CSS px. */
 export const MAX_LAYOUT_PX = 4096;
+/** The default virtual screen for embeds: `'720p'`. */
 export const DEFAULT_RESOLUTION: EmbedResolution = '720p';
 
-// The short side of the layout box in CSS px, or null for 'native' (the card's world size).
+/** The short side of the layout box in CSS px, or null for 'native' (the card's world size). */
 export function resolutionShortSide(res: EmbedResolution): number | null {
   if (res === 'native') return null;
   if (res === '720p') return 720;
@@ -20,6 +22,7 @@ export function resolutionShortSide(res: EmbedResolution): number | null {
   return Number.isFinite(res) && res > 0 ? res : 720;
 }
 
+/** Where and how big a live iframe is laid out, and the scale that maps it onto its card. */
 export interface EmbedPlacement {
   // CSS px: the layout box of the iframe wrapper (the virtual screen, or the world size for 'native').
   width: number;
@@ -39,6 +42,7 @@ export interface EmbedPlacement {
 const round3 = (v: number): number => Math.round(v * 1000) / 1000;
 const round6 = (v: number): number => Math.round(v * 1e6) / 1e6;
 
+/** Computes the iframe's layout size and the transform that fits it on a card's box. Pure. */
 export function embedPlacement(
   r: VideoRect,
   camera: Camera,

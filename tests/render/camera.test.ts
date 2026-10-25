@@ -66,6 +66,25 @@ describe('CameraController', () => {
     expect(fit.scale).toBeGreaterThanOrEqual(0.02);
   });
 
+  it('setRange changes the range, and brings a camera outside it in about the middle of the view', () => {
+    const { cam } = make();
+    cam.jumpTo({ tx: 100, ty: 50, scale: 3 });
+    const wx = (640 - cam.cam.tx) / cam.cam.scale;
+    cam.setRange(0.5, 2);
+    expect([cam.minScale, cam.maxScale]).toEqual([0.5, 2]);
+    expect(cam.cam.scale).toBe(2);
+    expect((640 - cam.cam.tx) / cam.cam.scale).toBeCloseTo(wx, 6);
+    // A flight already on its way lands inside the new range.
+    cam.flyTo({ tx: 0, ty: 0, scale: 1.5 });
+    cam.setRange(0.1, 1);
+    drain(cam);
+    expect(cam.cam.scale).toBe(1);
+    cam.setRange(0.05, 4);
+    cam.wheel({ x: 0, y: 0, deltaX: 0, deltaY: -20, deltaMode: 0, zoom: true });
+    drain(cam);
+    expect(cam.cam.scale).toBeGreaterThan(1);
+  });
+
   it('glides after a flick and then parks (busy goes false)', () => {
     const { cam } = make();
     cam.dragStart(100, 100, 0);

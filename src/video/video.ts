@@ -14,10 +14,10 @@
 // the two are one picture and the fade shows no jump. While the picture a card was asked for is not there (loading, or stalled mid-way) a ring spins
 // over its centre after INDICATOR_DELAY_MS, so a cached video never flashes it. Stopping fades back to
 // the thumbnail first, and only then lets go of the network.
-import type { Camera } from '../math';
+import type { Box, Camera } from '../math';
 import {
   attachVideoReveal,
-  createRevealSpinner,
+  buildRevealSpinner,
   INDICATOR_DELAY_MS,
   type VideoReveal,
 } from './reveal';
@@ -26,7 +26,8 @@ import { videoPlacement, type VideoRect } from './videoGeometry';
 export interface VideoTarget {
   id: string;
   src: string;
-  box: { x: number; y: number; w: number; h: number };
+  // The card's {@link Box}, in world px.
+  box: Box;
   // Degrees; the card rotates about the centre of its box.
   rot?: number;
   // World px. Applied as `clip-path: inset(0 round R)` in the video's own (world) space, so the
@@ -52,6 +53,10 @@ export interface VideoOverlayOptions {
   // ambient pool: one transform per frame for the whole screenful, instead of one per video). Then
   // `sync` has nothing to do and `follow` only writes when the card itself moved.
   worldSpace?: boolean;
+  // `nonce` of the injected <style> (a CSP with a nonce-based `style-src`).
+  nonce?: string;
+  // The file of the current card failed to load (the element's `error` event).
+  onError?: (target: { id: string; src: string }, cause: unknown) => void;
 }
 
 // What a world-space overlay is placed with: the camera's identity (the parent has the real one).
@@ -100,7 +105,7 @@ export class VideoOverlay {
       'max-width:none;max-height:none;object-fit:cover;display:none;';
 
     // The ring stays upright and the same size on screen, centred on the card: placed by `transform`.
-    const disc = createRevealSpinner(doc);
+    const disc = buildRevealSpinner(doc);
     disc.style.cssText =
       'position:absolute;left:0;top:0;' + (opts.spinner === false ? 'display:none;' : '');
 
@@ -109,7 +114,16 @@ export class VideoOverlay {
     this.video = v;
     this.host = host;
     this.disc = disc;
-    this.reveal = attachVideoReveal(v, { host });
+    this.reveal = attachVideoReveal(v, { host, nonce: opts.nonce });
+    const onError = opts.onError;
+    if (onError) {
+      v.addEventListener('error', (e) => {
+        // The error of a source we dropped (teardown) is not the card's.
+        const t = this.target;
+        if (!t || this.disposed || v.getAttribute('src') !== t.src) return;
+        onError({ id: t.id, src: t.src }, v.error ?? e);
+      });
+    }
   }
 
   // Playback switches. Applied at once and kept for every later card.

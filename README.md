@@ -14,7 +14,8 @@ boards of thousands of cards on an ordinary laptop.
 - **Video and embeds:** videos play over their WebGL poster; YouTube, Vimeo, Spotify, CodePen, Figma, any page or a
   snippet of HTML become sandboxed live iframes, loaded in chunks, frozen to a snapshot when too small to read.
 - **Layout and editing:** masonry, tidy grid, align and distribute with animated transitions; selection, drag, resize,
-  rotate, smart guides and grid snapping.
+  smart guides and grid snapping.
+- **Production bits:** `getSnapshot()` / `loadSnapshot()`, net-diff `change` events with a draw order, `applyChange` / `invertChange` for undo, redo and sync, a typed `error` event, `Corkboard.isSupported()`.
 
 **Live demo: [corkboard.niccolofanton.dev](https://corkboard.niccolofanton.dev)**
 
@@ -51,21 +52,36 @@ void main();
 - Embeds don't take pointer events: double-click (or Enter) to interact, Esc to leave. A known provider needs no setup;
   for titles, thumbnails and framing checks of other pages, pass `embeds.resolve` (see the [API reference](docs/API.md#embeds)).
 
+## React
+
+```tsx
+useEffect(() => {
+  const ctl = new AbortController(); // cancels a create() that StrictMode unmounts mid-flight
+  let board: Corkboard | undefined;
+  Corkboard.create(ref.current!, { signal: ctl.signal })
+    .then((b) => (board = b))
+    .catch((e) => { if (!ctl.signal.aborted) console.error(e); });
+  return () => { ctl.abort(); board?.dispose(); };
+}, []);
+```
+
 ## Strict CSP
 
-The decode worker is inlined and started from a blob URL. If your CSP forbids blob workers, serve the bundled worker and
-pass its URL; if it forbids `unsafe-eval`, add `cspSafe: true`:
+- `worker-src blob:`, or serve the bundled worker and pass `textures.workerUrl` (below).
+- No `unsafe-eval`: `cspSafe: true`. Nonce-based `style-src`: `nonce`.
+- `img-src data: blob:` for snapshots and previews. HTML snippets (`srcdoc`) inherit the page's CSP.
 
 ```ts
 import workerUrl from '@niccolofanton/corkboard/decode.worker.js?url'; // Vite; any bundler that gives you a file URL
-await Corkboard.create(el, { textures: { workerUrl }, cspSafe: true });
+await Corkboard.create(el, { textures: { workerUrl }, cspSafe: true, nonce });
 ```
 
 ## Docs
 
-- [API reference](docs/API.md): methods, options, events, embeds.
+- [API reference](docs/API.md): methods, options, events, errors, embeds, migrating from 0.1.
 - [HTML embeds](docs/HTML-EMBEDS.md): how embeds are loaded, culled, frozen and paused (§11), and the research behind it.
 - [Renderer handoff](docs/HANDOFF.md): stage, culling, LOD textures, atlas, video, layout, snapping, performance.
+- `@niccolofanton/corkboard/unstable`: the building blocks (stage, store, layout and snapping functions, `getInternals`), no semver guarantee.
 
 ## Development
 

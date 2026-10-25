@@ -2,9 +2,12 @@
 // Pure: items in, rectangles relative to the block's top-left out.
 import { DEFAULTS } from '../types';
 
+/** Width, world px, assumed for a card with no usable size when placing. */
 export const PLACEMENT_FALLBACK_WIDTH: number = DEFAULTS.cardWidth;
+/** Height / width assumed for a card with no usable aspect when placing. */
 export const PLACEMENT_FALLBACK_ASPECT: number = DEFAULTS.cardAspect;
 
+/** A card as the pure layout functions see it: id, size and aspect. */
 export interface LayoutItem {
   // Height / width. 0, negative, NaN or missing falls back to PLACEMENT_FALLBACK_ASPECT.
   aspect: number;
@@ -15,6 +18,7 @@ export interface LayoutItem {
   h?: number;
 }
 
+/** A rectangle a layout function placed a card at, world px. */
 export interface LayoutRect {
   x: number;
   y: number;
@@ -22,6 +26,7 @@ export interface LayoutRect {
   h: number;
 }
 
+/** What {@link masonry} returns: a rect per card and the block's size. */
 export interface MasonryResult {
   rects: LayoutRect[];
   // Bounds of the block: gaps only between items, none after the last.
@@ -29,14 +34,17 @@ export interface MasonryResult {
   height: number;
 }
 
+/** The height / width a layout uses for a card: its aspect if it is usable, else a default. */
 export function effectiveAspect(aspect: number | undefined): number {
   return aspect !== undefined && Number.isFinite(aspect) && aspect > 0
     ? aspect
     : PLACEMENT_FALLBACK_ASPECT;
 }
 
-// Column slot width that never lets an item with its own (larger) width spill into the next
-// column: callers that mix fixed-width items with resized cards pass it as `opts.slot`.
+/**
+ * Column slot width that never lets an item with its own (larger) width spill into the next
+ * column: callers that mix fixed-width items with resized cards pass it as `opts.slot`.
+ */
 export function slotWidth(items: readonly LayoutItem[], width: number): number {
   let slot = width;
   for (let i = 0; i < items.length; i++) {
@@ -46,8 +54,10 @@ export function slotWidth(items: readonly LayoutItem[], width: number): number {
   return slot;
 }
 
-// Items go in order into the shortest column, the leftmost when tied. Heights are integers
-// (width * aspect rounded) so equal-height columns tie exactly and the layout is reproducible.
+/**
+ * Items go in order into the shortest column, the leftmost when tied. Heights are integers
+ * (width * aspect rounded) so equal-height columns tie exactly and the layout is reproducible.
+ */
 export function masonry(
   items: readonly LayoutItem[],
   opts: { width: number; gap: number; columns: number; slot?: number },

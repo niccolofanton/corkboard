@@ -13,7 +13,7 @@ import {
   type AlignMode,
   type TidyItem,
 } from '../../src/layout';
-import { boxCx, boxCy, rotatedExtent, type Box } from '../../src/interact/geometry';
+import { boxCx, boxCy, rotatedExtent, type Aabb } from '../../src/interact/geometry';
 import { median } from '../../src/layout/stats';
 
 // Height / width of the covers a mixed library has.
@@ -21,7 +21,7 @@ const ASPECTS = [1.25, 0.75, 1, 1.5, 0.66, 1.33, 1.78, 0.56];
 const WIDTHS = [248, 248, 320, 200, 248, 280, 220, 248];
 
 interface Item extends TidyItem {
-  box: Box;
+  box: Aabb;
 }
 
 // A card at (x, y) as a store would hold it; its AABB is what a rotation makes of the box.
@@ -59,7 +59,7 @@ function scattered(): Item[] {
 }
 
 // Two boxes overlap when they are closer than `gap` on both axes.
-function overlaps(a: Box, b: Box, gap = 0): boolean {
+function overlaps(a: Aabb, b: Aabb, gap = 0): boolean {
   return (
     a.minX < b.maxX + gap - 1e-6 &&
     b.minX < a.maxX + gap - 1e-6 &&
@@ -68,7 +68,7 @@ function overlaps(a: Box, b: Box, gap = 0): boolean {
   );
 }
 
-function crossings(boxes: Box[], gap = 0): [number, number][] {
+function crossings(boxes: Aabb[], gap = 0): [number, number][] {
   const out: [number, number][] = [];
   for (let i = 0; i < boxes.length; i++) {
     for (let j = i + 1; j < boxes.length; j++)
@@ -78,9 +78,9 @@ function crossings(boxes: Box[], gap = 0): [number, number][] {
 }
 
 const moved = (
-  items: readonly { id: string; box: Box }[],
+  items: readonly { id: string; box: Aabb }[],
   d: Map<string, { dx: number; dy: number }>,
-): Box[] =>
+): Aabb[] =>
   items.map((it) => {
     const m = d.get(it.id) ?? { dx: 0, dy: 0 };
     return {
@@ -161,7 +161,7 @@ describe('align keeps the selection apart', () => {
     const items = scattered();
     const out = moved(items, align(items, mode, { gap }));
     expect(crossings(out, gap)).toEqual([]);
-    const edge = (b: Box): number => {
+    const edge = (b: Aabb): number => {
       switch (mode) {
         case 'left':
           return b.minX;

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { align, distribute, equalWidth, type AlignMode } from '../../src/layout';
-import type { Box } from '../../src/interact/geometry';
+import type { Aabb } from '../../src/interact/geometry';
 
-const box = (minX: number, minY: number, maxX: number, maxY: number): Box => ({
+const box = (minX: number, minY: number, maxX: number, maxY: number): Aabb => ({
   minX,
   minY,
   maxX,

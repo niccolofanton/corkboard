@@ -17,34 +17,44 @@
 // sorted lines per axis, the owner boxes, the gaps between neighbouring boxes (sorted by size) and the
 // sorted widths / heights. A move then costs a few binary searches plus one linear pass over the
 // candidates to find the box's neighbours, with no allocation beyond the guide objects.
-import type { Box } from './geometry';
+import type { Aabb } from './geometry';
 
+/** A card the snapping session compares a moving card against. */
 export interface SnapCandidate {
   id: string;
-  box: Box;
+  box: Aabb;
 }
 
-// Screen px: the snap threshold and how far a guide runs past its outermost marker. Callers divide by
-// the zoom.
+/**
+ * Screen px: the snap threshold and how far a guide runs past its outermost marker. Callers divide by
+ * the zoom.
+ */
 export const SNAP_THRESHOLD_PX = 6;
+/** How far a guide line extends past the cards it joins, screen px. */
 export const GUIDE_OVERSHOOT_PX = 3;
-// Hysteresis, in thresholds: a held target lets go beyond SNAP_RELEASE, and a new target takes over
-// only when it is nearer than the held one by more than SNAP_SWITCH.
+/**
+ * Hysteresis, in thresholds: a held target lets go beyond SNAP_RELEASE, and a new target takes over
+ * only when it is nearer than the held one by more than SNAP_SWITCH.
+ */
 export const SNAP_RELEASE = 1.5;
 export const SNAP_SWITCH = 0.5;
 
-// Lines closer than this (world units) count as the same line: it collects coincident candidates into
-// one guide and absorbs floating point noise left by the correction.
+/**
+ * Lines closer than this (world units) count as the same line: it collects coincident candidates into
+ * one guide and absorbs floating point noise left by the correction.
+ */
 export const SNAP_EPS = 0.01;
 
-// An alignment guide. A vertical guide (axis 'x') is the line x = `at` running from y = `from` to
-// y = `to`; a horizontal guide (axis 'y') is the line y = `at` running from x = `from` to x = `to`.
-// World units. `kind` follows the moving line that produced it ('center' for the centre / middle line,
-// 'edge' for the outer ones).
-// `marks`: where the line meets each aligned box, sorted (positions along the line, world units): the
-// two corners of a box aligned by an edge, the midpoint of one aligned by its centre, for the moving
-// box and the candidates on the line nearest to it (at most six). The span runs from the first mark to
-// the last plus the overshoot.
+/**
+ * An alignment guide. A vertical guide (axis 'x') is the line x = `at` running from y = `from` to
+ * y = `to`; a horizontal guide (axis 'y') is the line y = `at` running from x = `from` to x = `to`.
+ * World units. `kind` follows the moving line that produced it ('center' for the centre / middle line,
+ * 'edge' for the outer ones).
+ * `marks`: where the line meets each aligned box, sorted (positions along the line, world units): the
+ * two corners of a box aligned by an edge, the midpoint of one aligned by its centre, for the moving
+ * box and the candidates on the line nearest to it (at most six). The span runs from the first mark to
+ * the last plus the overshoot.
+ */
 export interface LineGuide {
   axis: 'x' | 'y';
   at: number;
@@ -54,15 +64,17 @@ export interface LineGuide {
   marks?: number[];
 }
 
-// A measurement marker. NOTE the axis convention differs from `LineGuide`: here `axis` is the direction
-// the measured segment RUNS along. A segment along 'x' is horizontal: it sits at y = `at` and runs from
-// x = `from` to x = `to`; along 'y' it is vertical at x = `at`, from y = `from` to y = `to`. World units.
-//  - 'gap': the empty space between two boxes, `label` = its size in world px, rounded to an integer.
-//    Emitted for the moving box's own gap(s) and for each existing gap it was matched to; `at` is the
-//    middle of the range the two boxes face each other over.
-//  - 'width' (axis 'x') / 'height' (axis 'y'): the extent of one box, spanning from edge to edge, drawn
-//    at the middle of the box (`at`). Emitted for the resized box and for each box whose extent it was
-//    matched to; `label` = the extent in world px, rounded (the overlay draws "=" instead).
+/**
+ * A measurement marker. NOTE the axis convention differs from `LineGuide`: here `axis` is the direction
+ * the measured segment RUNS along. A segment along 'x' is horizontal: it sits at y = `at` and runs from
+ * x = `from` to x = `to`; along 'y' it is vertical at x = `at`, from y = `from` to y = `to`. World units.
+ *  - 'gap': the empty space between two boxes, `label` = its size in world px, rounded to an integer.
+ *    Emitted for the moving box's own gap(s) and for each existing gap it was matched to; `at` is the
+ *    middle of the range the two boxes face each other over.
+ *  - 'width' (axis 'x') / 'height' (axis 'y'): the extent of one box, spanning from edge to edge, drawn
+ *    at the middle of the box (`at`). Emitted for the resized box and for each box whose extent it was
+ *    matched to; `label` = the extent in world px, rounded (the overlay draws "=" instead).
+ */
 export interface MeasureGuide {
   axis: 'x' | 'y';
   at: number;
@@ -72,11 +84,13 @@ export interface MeasureGuide {
   label: number;
 }
 
-// Every guide carries `axis`, `at`, `from`, `to` and `kind`; tell the families apart by `kind`.
+/** Every guide carries `axis`, `at`, `from`, `to` and `kind`; tell the families apart by `kind`. */
 export type Guide = LineGuide | MeasureGuide;
 
-// `dx` / `dy`: the correction to ADD to the moving box (0 when that axis does not snap). A box that
-// already lies on a line reports 0 and still carries the guide.
+/**
+ * `dx` / `dy`: the correction to ADD to the moving box (0 when that axis does not snap). A box that
+ * already lies on a line reports 0 and still carries the guide.
+ */
 export interface SnapResult {
   dx: number;
   dy: number;
@@ -87,6 +101,7 @@ export interface SnapResult {
   edgeY?: 'min' | 'max';
 }
 
+/** Which edges of a card a resize moves. */
 export interface ResizeEdges {
   left?: boolean;
   right?: boolean;
@@ -117,6 +132,7 @@ const REF_GAP_SCAN = 256;
 
 const AXES = ['x', 'y'] as const;
 
+/** The alignment lines found along one axis. */
 interface AxisLines {
   // Sorted line positions, with the owner (index into `boxes`) and kind of each line.
   readonly v: Float64Array;
@@ -124,8 +140,7 @@ interface AxisLines {
   readonly kind: Uint8Array;
 }
 
-// The gaps along one axis, sorted by size: each is the empty space between two candidate boxes that
-// face each other over a positive length of the other axis, with nothing between them.
+/** The equal-gap measures found along one axis. */
 interface GapList {
   readonly v: Float64Array;
   // Owners of the box before (smaller coordinate) and after the gap.
@@ -133,13 +148,13 @@ interface GapList {
   readonly after: Int32Array;
 }
 
-// The extents (widths or heights) of the candidate boxes, sorted.
+/** The size-match measures found along one axis. */
 interface SizeList {
   readonly v: Float64Array;
   readonly owner: Int32Array;
 }
 
-// Opaque to callers: build it with `buildSnapIndex`, hand it back to `snapMove` / `snapResize`.
+/** Opaque to callers: build it with `buildSnapIndex`, hand it back to `snapMove` / `snapResize`. */
 export interface SnapIndex {
   // Number of owners (the candidates that were usable).
   readonly count: number;
@@ -200,7 +215,7 @@ function sortLines(
   return { v, owner, kind };
 }
 
-function validBox(b: Box): boolean {
+function validBox(b: Aabb): boolean {
   return (
     Number.isFinite(b.minX) &&
     Number.isFinite(b.minY) &&
@@ -308,9 +323,11 @@ function buildGaps(boxes: Float64Array, n: number, ax: number): GapList {
   return { v, before, after };
 }
 
-// O(n log n) for the lines and sizes, done once at drag start; the gaps cost a bounded quadratic pass
-// over at most GAP_BOX_CAP boxes. Candidates give left / centre / right and top / middle / bottom
-// lines, gaps and sizes. Boxes that are not finite are ignored.
+/**
+ * O(n log n) for the lines and sizes, done once at drag start; the gaps cost a bounded quadratic pass
+ * over at most GAP_BOX_CAP boxes. Candidates give left / centre / right and top / middle / bottom
+ * lines, gaps and sizes. Boxes that are not finite are ignored.
+ */
 export function buildSnapIndex(candidates: readonly SnapCandidate[]): SnapIndex {
   const maxOwners = candidates.length;
   const boxes = new Float64Array(maxOwners * 4);
@@ -826,8 +843,10 @@ function stickyFor(out: SnapResult, index: SnapIndex): Sticky {
   return st;
 }
 
-// Forget what `out` held (the next call snaps afresh): for a caller that skipped snapping for a while
-// (the modifier that suspends it) and does not want the old target back.
+/**
+ * Forget what `out` held (the next call snaps afresh): for a caller that skipped snapping for a while
+ * (the modifier that suspends it) and does not want the old target back.
+ */
 export function resetSnapHysteresis(out: SnapResult): void {
   const st = stickies.get(out);
   if (st) {
@@ -1098,7 +1117,7 @@ function newResult(): SnapResult {
 // box the guides are measured from: a move shifts the whole box, a resize only the dragged edge.
 function snap(
   index: SnapIndex,
-  moving: Box,
+  moving: Aabb,
   maskX: number,
   maskY: number,
   wholeBox: boolean,
@@ -1186,13 +1205,15 @@ function snap(
   return out;
 }
 
-// Moving a whole box (a card, or a multi-selection's union). The smallest |delta| within
-// `thresholdWorld` wins over the three lines of each axis and the gap snaps; ties prefer
-// centre-to-centre, then edge-to-edge, and an alignment over a gap. Pass `out`
-// to reuse one result object across a drag.
+/**
+ * Moving a whole box (a card, or a multi-selection's union). The smallest |delta| within
+ * `thresholdWorld` wins over the three lines of each axis and the gap snaps; ties prefer
+ * centre-to-centre, then edge-to-edge, and an alignment over a gap. Pass `out`
+ * to reuse one result object across a drag.
+ */
 export function snapMove(
   index: SnapIndex,
-  moving: Box,
+  moving: Aabb,
   thresholdWorld: number,
   extendWorld: number,
   out: SnapResult = newResult(),
@@ -1200,15 +1221,17 @@ export function snapMove(
   return snap(index, moving, 7, 7, true, thresholdWorld, extendWorld, out);
 }
 
-// Resizing: only the dragged edges snap (a centre moves with the box, so it never does), to lines, to
-// the box's width / height matching a nearby box's, and to equal gaps next to the dragged edge. The
-// correction applies to the dragged edge's coordinate: `dx` to the left or right edge, `dy` to the
-// top or bottom one. If both opposite edges of an axis are flagged (a symmetric resize), only the
-// nearer one snaps to a line and sizes and gaps are skipped; `edgeX` / `edgeY` then say which edge the
-// correction belongs to.
+/**
+ * Resizing: only the dragged edges snap (a centre moves with the box, so it never does), to lines, to
+ * the box's width / height matching a nearby box's, and to equal gaps next to the dragged edge. The
+ * correction applies to the dragged edge's coordinate: `dx` to the left or right edge, `dy` to the
+ * top or bottom one. If both opposite edges of an axis are flagged (a symmetric resize), only the
+ * nearer one snaps to a line and sizes and gaps are skipped; `edgeX` / `edgeY` then say which edge the
+ * correction belongs to.
+ */
 export function snapResize(
   index: SnapIndex,
-  moving: Box,
+  moving: Aabb,
   edges: ResizeEdges,
   thresholdWorld: number,
   extendWorld: number,

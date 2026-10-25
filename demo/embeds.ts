@@ -2,7 +2,7 @@
 //   1. Stretched previews: an embed card's poster is drawn stretched when its aspect differs from the card's.
 //   2. Embeds vanish too early: a live iframe is swapped for the poster while it is still plainly visible.
 // Only the public API is used, so the page works against any version of the library.
-import { Corkboard, type ElementInit, type EmbedInfo } from '@niccolofanton/corkboard';
+import { Corkboard, type CardInit, type EmbedInfo } from '@niccolofanton/corkboard';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -180,7 +180,7 @@ interface Group {
 const group1: Group = { ids: [] };
 const group2: Group = { ids: [] };
 
-function addGroup(board: Corkboard, group: Group, inits: ElementInit[]): string[] {
+function addGroup(board: Corkboard, group: Group, inits: CardInit[]): string[] {
   const ids = board.add(inits);
   group.ids.push(...ids);
   return ids;
@@ -200,7 +200,7 @@ function build(board: Corkboard): void {
     },
   ]);
   let x = 0;
-  const place = (init: ElementInit, w: number, h: number): void => {
+  const place = (init: CardInit, w: number, h: number): void => {
     addGroup(board, group1, [{ ...init, x, y: G1_Y, w, h, aspectLocked: false }]);
     x += w + GAP;
   };
@@ -254,7 +254,7 @@ function build(board: Corkboard): void {
     ['Counter', SNIPPET_COUNTER, 'native'],
     ['Spinner', SNIPPET_SPINNER],
   ];
-  const cards: ElementInit[] = snippets.map(([title, html, resolution]) => ({
+  const cards: CardInit[] = snippets.map(([title, html, resolution]) => ({
     media: {
       src: poster,
       embed: { html, title, ...(resolution ? { resolution: resolution as 'native' } : {}) },
@@ -272,18 +272,6 @@ function build(board: Corkboard): void {
 }
 
 // ── HUD ──────────────────────────────────────────────────────────────────────
-
-// `board.embeds.parked` exists only in newer versions of the library: read it defensively.
-function parkedCount(board: Corkboard): string {
-  const p = (board.embeds as unknown as { parked?: unknown }).parked;
-  if (p === undefined || p === null) return 'n/a';
-  if (typeof p === 'number') return String(p);
-  if (typeof p === 'function') return 'n/a';
-  const size = (p as { size?: unknown }).size;
-  if (typeof size === 'number') return String(size);
-  const len = (p as { length?: unknown }).length;
-  return typeof len === 'number' ? String(len) : 'n/a';
-}
 
 // Fits a group in the view, leaving the HUD's strip on the left free.
 function fitGroup(board: Corkboard, group: Group, animate: boolean): void {
@@ -339,29 +327,23 @@ async function main(): Promise<void> {
     posters.textContent = on ? 'Posters only: ON' : 'Posters only';
     // 0 live iframes at once: every embed card stays a poster.
     // maxMounted: parked frames would cover the posters (ignored by builds that have no parking).
-    board.setEmbeds(
+    board.embeds.setOptions(
       (on
         ? { maxLive: 0, maxLiveTouch: 0, maxMounted: 0, maxMountedTouch: 0 }
-        : { maxLive: 12, maxLiveTouch: 3, maxMounted: 24, maxMountedTouch: 6 }) as Parameters<typeof board.setEmbeds>[0],
+        : { maxLive: 12, maxLiveTouch: 3, maxMounted: 24, maxMountedTouch: 6 }) as Parameters<typeof board.embeds.setOptions>[0],
     );
   };
 
   setInterval(() => {
-    $('s-live').textContent = `${board.embeds.live.size} / ${board.embeds.maxLive}`;
-    $('s-parked').textContent = parkedCount(board);
-    // Absent in builds without the loading indicator.
-    const loading = (board.embeds as { loading?: ReadonlySet<string> }).loading;
-    $('s-loading').textContent = loading ? String(loading.size) : 'n/a';
-    // The same for the states later builds added: culled (off screen), frozen (snapshot), the animating budget.
-    const e = board.embeds as { culled?: ReadonlySet<string>; frozen?: ReadonlySet<string>; animating?: ReadonlySet<string>; animatingBudget?: number };
-    $('s-culled').textContent = e.culled ? String(e.culled.size) : 'n/a';
-    $('s-frozen').textContent = e.frozen ? String(e.frozen.size) : 'n/a';
-    $('s-animating').textContent = e.animating
-      ? `${e.animating.size} / ${e.animatingBudget === Infinity ? '∞' : String(e.animatingBudget)}`
-      : 'n/a';
-    // Snippet previews, in builds that have them.
-    const pending = (board.embeds as { previewsPending?: number }).previewsPending;
-    $('s-previews').textContent = pending === undefined ? 'n/a' : String(pending);
+    const e = board.stats().embeds;
+    const inf = (n: number): string => (Number.isFinite(n) ? String(n) : '∞');
+    $('s-live').textContent = `${e.active} / ${inf(e.maxLive)}`;
+    $('s-parked').textContent = String(e.parked);
+    $('s-loading').textContent = String(e.loading);
+    $('s-culled').textContent = String(e.culled);
+    $('s-frozen').textContent = String(e.frozen);
+    $('s-animating').textContent = `${e.animating} / ${inf(e.animatingBudget)}`;
+    $('s-previews').textContent = String(e.previewsPending);
     $('s-destroyed').textContent = String(destroyed);
     $('s-zoom').textContent = `${Math.round(board.camera.get().scale * 100)}%`;
     $('log').textContent = lines.join('\n');

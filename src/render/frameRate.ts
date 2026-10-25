@@ -16,17 +16,18 @@
 export const SAMPLE_WINDOW_MS = 1000;
 export const SLOW_FPS = 40;
 export const SMOOTH_FPS = 55;
-// Windows in a row over SMOOTH_FPS that consumers take as "room to give something back".
+/** Windows in a row over SMOOTH_FPS that consumers take as "room to give something back". */
 export const SMOOTH_WINDOWS = 2;
 const REFERENCE_HZ = 60;
 // A gap between two frames this long is a hidden or occluded page, not a slow one: the window is dropped.
 const STALL_MS = 2500;
-// A burst: at most this many counted windows, or until this many in a row agree.
+/** A burst: at most this many counted windows, or until this many in a row agree. */
 export const BURST_WINDOWS = 4;
 export const AGREE_WINDOWS = 2;
-// While anything renders, a burst starts at least this often even if nothing happened.
+/** While anything renders, a burst starts at least this often even if nothing happened. */
 export const HEARTBEAT_MS = 10_000;
 
+/** One window of frame-time samples from the frame-rate monitor. */
 export interface FrameWindow {
   fps: number;
   // Under SLOW_FPS (scaled to the display).
@@ -35,6 +36,7 @@ export interface FrameWindow {
   smooth: boolean;
 }
 
+/** What the frame-rate monitor needs from its environment (a seam for tests). */
 export interface FrameRateDeps {
   // The frame scheduler (default: the window's). A seam for tests; the callback gets the frame's timestamp,
   // which is the only clock the monitor reads.
@@ -59,6 +61,7 @@ interface Run {
   deltas: number[];
 }
 
+/** Measures the page's frame rate in short bursts, for the layers that shed load when it is slow. */
 export class FrameRateMonitor {
   private readonly rafFn: ((cb: (time: number) => void) => number) | undefined;
   private readonly cafFn: ((id: number) => void) | undefined;

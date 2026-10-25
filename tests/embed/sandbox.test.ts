@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { EMBED_CB, SNIPPET_BOOTSTRAP } from '../../src/embed/bootstrap';
+import { CorkboardError } from '../../src/errors';
 import {
+  hostIsolated,
   iframeSpecFor,
+  normalizeIsolatedHost,
+  normalizeIsolatedHosts,
+  SNIPPET_CSP_NONE,
+  snippetCsp,
   SANDBOX_ARBITRARY,
   SANDBOX_PROVIDER,
   SANDBOX_SNIPPET,
@@ -155,6 +161,24 @@ describe('snippet bootstrap', () => {
     return { w, msg, close: () => frame.remove(), parent: w.parent };
   };
 
+  it('has no handshake: it neither announces itself nor answers a ping, and stays small', async () => {
+    const frame = document.createElement('iframe');
+    document.body.appendChild(frame);
+    const w = frame.contentWindow as Window & { eval(s: string): unknown };
+    Object.assign(w.document, { getAnimations: () => [] });
+    const seen: unknown[] = [];
+    const onReply = (e: Event): void => void seen.push((e as MessageEvent).data);
+    w.parent.addEventListener('message', onReply);
+    w.eval(SNIPPET_BOOTSTRAP);
+    w.dispatchEvent(new MessageEvent('message', { data: { cb: EMBED_CB, op: 'ping', n: 1 }, source: w.parent, origin: location.origin }));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(seen).toEqual([]);
+    expect(SNIPPET_BOOTSTRAP).not.toMatch(/hello|token|ping/i);
+    expect(SNIPPET_BOOTSTRAP.length).toBeLessThan(5000);
+    w.parent.removeEventListener('message', onReply);
+    frame.remove();
+  });
+
   it('holds requestAnimationFrame while paused, and flushes it on resume', async () => {
     const { w, msg, close } = boot();
     const seen: string[] = [];
@@ -183,7 +207,10 @@ describe('snippet bootstrap', () => {
   it('answers a snapshot request with the same id: SVG markup, or ok: false when it cannot build it', async () => {
     const { msg, close, parent } = boot();
     const replies: unknown[] = [];
-    const onReply = (e: Event): void => void replies.push((e as MessageEvent).data);
+    const onReply = (e: Event): void => {
+      const d = (e as MessageEvent).data;
+      if (d.op === 'snapshot') replies.push(d);
+    };
     parent.addEventListener('message', onReply);
     msg({ cb: EMBED_CB, op: 'snapshot', id: 42, w: 100, h: 50 });
     await vi.waitFor(() => expect(replies).toHaveLength(1), { timeout: 3000 });
@@ -199,7 +226,10 @@ describe('snippet bootstrap', () => {
   it('lays a snapshot out at vw x vh when the window reports no size, and says no when it has none', async () => {
     const { w, msg, close, parent } = boot();
     const replies: Array<{ id: number; ok: boolean; svg?: string }> = [];
-    const onReply = (e: Event): void => void replies.push((e as MessageEvent).data);
+    const onReply = (e: Event): void => {
+      const d = (e as MessageEvent).data;
+      if (d.op === 'snapshot') replies.push(d);
+    };
     parent.addEventListener('message', onReply);
     // A frame that is display: none.
     Object.defineProperty(w, 'innerWidth', { value: 0, configurable: true });
@@ -282,6 +312,208 @@ describe('snippet bootstrap', () => {
       await wait(20);
       expect(seen).toEqual([1]);
       close();
+    });
+  });
+});
+
+describe('snippetNetwork', () => {
+  it("'images' is today's CSP and the default; 'none' allows no https at all", () => {
+    expect(snippetCsp()).toBe(SNIPPET_CSP);
+    expect(snippetCsp('images')).toBe(SNIPPET_CSP);
+    expect(SNIPPET_CSP).toContain('img-src data: https:');
+    expect(SNIPPET_CSP).toContain('font-src https: data:');
+    expect(snippetCsp('none')).toBe(SNIPPET_CSP_NONE);
+    expect(SNIPPET_CSP_NONE).toContain("default-src 'none'");
+    expect(SNIPPET_CSP_NONE).toContain('img-src data: blob:;');
+    expect(SNIPPET_CSP_NONE).toContain('font-src data:');
+    expect(SNIPPET_CSP_NONE).not.toContain('https:');
+  });
+
+  it('puts the chosen policy in the document, before anything of the snippet', () => {
+    const none = iframeSpecFor({ source: { html: '<p>hi</p>' }, snippetNetwork: 'none' });
+    expect(none?.srcdoc).toContain(`content="${SNIPPET_CSP_NONE}"`);
+    expect(none?.srcdoc?.indexOf('Content-Security-Policy')).toBeLessThan(none?.srcdoc?.indexOf('<p>hi</p>') ?? 0);
+    expect(iframeSpecFor({ source: { html: '<p>hi</p>' } })?.srcdoc).toContain(`content="${SNIPPET_CSP}"`);
+    expect(snippetDocument('<p/>', 'none')).toContain(SNIPPET_CSP_NONE);
+  });
+
+  it('hands the snippet CSP to the iframe `csp` attribute (Embedded Enforcement), for snippets only', () => {
+    expect(iframeSpecFor({ source: { html: '<p/>' } })?.csp).toBe(SNIPPET_CSP);
+    expect(iframeSpecFor({ source: { html: '<p/>' }, snippetNetwork: 'none' })?.csp).toBe(SNIPPET_CSP_NONE);
+    expect(iframeSpecFor({ source: { url: 'https://example.com/' } })?.csp).toBeUndefined();
+    expect(iframeSpecFor({ source: { url: 'https://youtu.be/dQw4w9WgXcQ' }, iframeSrc: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ' })?.csp).toBeUndefined();
+  });
+});
+
+describe('isolatedHosts', () => {
+  const sandbox = (url: string, isolatedHosts?: readonly string[]) => iframeSpecFor({ source: { url }, isolatedHosts })?.sandbox;
+
+  it('drops allow-same-origin for the host and its subdomains, whatever the case or a leading dot', () => {
+    const want = 'allow-scripts allow-forms allow-popups';
+    expect(sandbox('https://example.com/x', ['example.com'])).toBe(want);
+    expect(sandbox('https://App.Example.com/x', ['example.com'])).toBe(want);
+    expect(sandbox('https://app.example.com/x', ['.EXAMPLE.com'])).toBe(want);
+    expect(sandbox('https://a.b.example.com/x', ['other.org', 'example.com'])).toBe(want);
+  });
+
+  it('leaves everything else as it was', () => {
+    expect(sandbox('https://notexample.com/x', ['example.com'])).toBe(SANDBOX_ARBITRARY);
+    expect(sandbox('https://example.com.evil.org/x', ['example.com'])).toBe(SANDBOX_ARBITRARY);
+    expect(sandbox('https://example.com/x', [])).toBe(SANDBOX_ARBITRARY);
+    expect(sandbox('https://example.com/x')).toBe(SANDBOX_ARBITRARY);
+    // An empty or blank entry matches nothing.
+    expect(sandbox('https://example.com/x', ['', ' ', '.'])).toBe(SANDBOX_ARBITRARY);
+  });
+
+  it('applies to providers too (the profile is otherwise kept)', () => {
+    const s = iframeSpecFor({
+      source: { url: 'https://youtu.be/dQw4w9WgXcQ' },
+      iframeSrc: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
+      isolatedHosts: ['youtube-nocookie.com'],
+    });
+    expect(s?.profile).toBe('provider');
+    expect(s?.sandbox).toBe('allow-scripts allow-forms allow-popups allow-presentation');
+  });
+
+  it('hostIsolated ignores URLs it cannot parse', () => {
+    expect(hostIsolated('not a url', ['example.com'])).toBe(false);
+    expect(hostIsolated('https://example.com./', ['example.com'])).toBe(true);
+  });
+
+  describe('normalisation', () => {
+    it.each([
+      ['example.com', 'example.com'],
+      ['EXAMPLE.com', 'example.com'],
+      ['  Example.COM  ', 'example.com'],
+      ['.example.com', 'example.com'],
+      ['*.example.com', 'example.com'],
+      ['example.com.', 'example.com'],
+      ['example.com:443', 'example.com'],
+      ['example.com:8080', 'example.com'],
+      ['https://example.com', 'example.com'],
+      ['https://example.com/', 'example.com'],
+      ['https://Example.com:8443/', 'example.com'],
+      ['http://example.com./', 'example.com'],
+      ['bücher.de', 'xn--bcher-kva.de'],
+      ['BÜCHER.de', 'xn--bcher-kva.de'],
+      ['xn--bcher-kva.de', 'xn--bcher-kva.de'],
+      ['*.bücher.de', 'xn--bcher-kva.de'],
+      ['localhost', 'localhost'],
+      ['127.0.0.1', '127.0.0.1'],
+      ['127.0.0.1:3000', '127.0.0.1'],
+      ['::1', '[::1]'],
+      ['[::1]', '[::1]'],
+      ['[::1]:8080', '[::1]'],
+      ['https://[::1]:8080/', '[::1]'],
+      ['2001:DB8::1', '[2001:db8::1]'],
+    ])('%s -> %s', (entry, host) => {
+      expect(normalizeIsolatedHost(entry)).toBe(host);
+      // Idempotent.
+      expect(normalizeIsolatedHost(host)).toBe(host);
+    });
+
+    it.each(['', ' ', '.', '..', ' . '])('blank entry %j matches nothing', (entry) => {
+      expect(normalizeIsolatedHost(entry)).toBeNull();
+      expect(normalizeIsolatedHosts([entry, 'example.com'])).toEqual(['example.com']);
+    });
+
+    it.each([
+      'example.com/path',
+      'example.com/',
+      'https://example.com/path',
+      'https://example.com/?q=1',
+      'https://example.com/#x',
+      'example.com?x',
+      'example.com#x',
+      'user@example.com',
+      'https://user:pw@example.com/',
+      'https://user@example.com',
+      'user:pw@example.com',
+      'exa mple.com',
+      'example.*',
+      'ex*mple.com',
+      '*',
+      '**.example.com',
+      'https://*.example.com',
+      'example.com:99999',
+      'example.com:abc',
+      'https://',
+      'http://:80',
+      'file:///etc/passwd',
+      '[::1',
+      '[nope]',
+      '-.com',
+      'a..b',
+    ])('rejects %j with CorkboardError("invalid")', (entry) => {
+      expect(() => normalizeIsolatedHost(entry)).toThrow(CorkboardError);
+      try {
+        normalizeIsolatedHost(entry);
+      } catch (e) {
+        expect((e as CorkboardError).code).toBe('invalid');
+      }
+    });
+
+    it('a list with one bad entry throws, naming it', () => {
+      expect(() => normalizeIsolatedHosts(['example.com', 'x.org/a'])).toThrow(/"x\.org\/a"/);
+    });
+  });
+
+  describe('matching', () => {
+    // [entry, url, isolated]
+    it.each([
+      // Domains: the host and its subdomains, in any spelling of the entry.
+      ['example.com', 'https://example.com/', true],
+      ['example.com', 'https://EXAMPLE.COM/', true],
+      ['example.com', 'https://example.com./', true],
+      ['example.com', 'https://a.b.example.com/x', true],
+      ['example.com', 'https://example.com:8443/x', true],
+      ['example.com.', 'https://app.example.com/', true],
+      ['EXAMPLE.com', 'https://app.example.com/', true],
+      ['.example.com', 'https://app.example.com/', true],
+      ['*.example.com', 'https://example.com/', true],
+      ['*.example.com', 'https://app.example.com/', true],
+      ['example.com:443', 'https://app.example.com/', true],
+      ['https://example.com', 'https://app.example.com/', true],
+      ['https://example.com/', 'http://example.com/', true],
+      ['bücher.de', 'https://bücher.de/', true],
+      ['bücher.de', 'https://www.xn--bcher-kva.de/', true],
+      ['xn--bcher-kva.de', 'https://BÜCHER.de/', true],
+      ['*.bücher.de', 'https://shop.bücher.de/', true],
+      // Look-alikes and parents.
+      ['example.com', 'https://notexample.com/', false],
+      ['example.com', 'https://example.com.evil.org/', false],
+      ['example.com', 'https://example.org/', false],
+      ['app.example.com', 'https://example.com/', false],
+      ['*.example.com', 'https://notexample.com/', false],
+      ['bücher.de', 'https://buecher.de/', false],
+      // IP literals match exactly, never as a suffix.
+      ['127.0.0.1', 'http://127.0.0.1/', true],
+      ['127.0.0.1', 'http://127.0.0.1:3000/x', true],
+      ['0.1', 'http://127.0.0.1/', false],
+      ['1', 'http://127.0.0.1/', false],
+      ['0.0.1', 'http://127.0.0.1/', false],
+      ['27.0.0.1', 'http://127.0.0.1/', false],
+      ['127.0.0.1', 'http://127.0.0.10/', false],
+      ['127.0.0.1', 'http://a.127.0.0.1.example.com/', false],
+      ['::1', 'http://[::1]/', true],
+      ['::1', 'http://[::1]:3000/x', true],
+      ['[::1]', 'http://[::1]/', true],
+      ['[::1]:8080', 'http://[::1]/', true],
+      ['https://[::1]/', 'http://[::1]/', true],
+      ['::1', 'http://[::2]/', false],
+      ['::1', 'http://[0:0:0:0:0:0:0:1]/', true],
+      ['::1', 'http://localhost/', false],
+      ['1', 'http://[::1]/', false],
+      ['localhost', 'http://localhost:5173/', true],
+      ['localhost', 'http://app.localhost/', true],
+    ] as const)('entry %j, url %s -> %s', (entry, url, want) => {
+      expect(hostIsolated(url, [entry])).toBe(want);
+      expect(sandbox(url, [entry])).toBe(want ? 'allow-scripts allow-forms allow-popups' : SANDBOX_ARBITRARY);
+    });
+
+    it('rejects a bad entry instead of failing open', () => {
+      expect(() => hostIsolated('https://example.com/', ['example.com/path'])).toThrow(CorkboardError);
+      expect(() => iframeSpecFor({ source: { url: 'https://example.com/' }, isolatedHosts: ['u:p@example.com'] })).toThrow(CorkboardError);
     });
   });
 });

@@ -18,8 +18,13 @@ export {
   SANDBOX_ARBITRARY,
   SANDBOX_SNIPPET,
   SNIPPET_CSP,
+  SNIPPET_CSP_NONE,
+  snippetCsp,
+  hostIsolated,
 } from './sandbox';
-export type { IframeSpec, IframeInput, SandboxProfile } from './sandbox';
+export type { IframeSpec, IframeInput, SandboxProfile, SnippetNetwork } from './sandbox';
+export { clearPreviewCache, PREVIEW_CACHE_NAME } from './previewCache';
+export type { PreviewCacheMode } from './previewCache';
 export {
   planLive,
   isEligible,

@@ -13,7 +13,7 @@
 // to ask for a frame.
 import { Container, Graphics } from 'pixi.js';
 import type { Camera } from '../math';
-import type { Box } from '../interact/geometry';
+import type { Aabb } from '../interact/geometry';
 import type { Handle } from '../interact/handles';
 import { outlinePoints, type OutlineRect } from '../interact/outline';
 import type { Guide } from '../interact/snapping';
@@ -23,6 +23,7 @@ import type { Theme } from './theme';
 export const HANDLE_SIZE = 8;
 const OUTLINE = 1.5;
 
+/** What the overlay draws for the selection. */
 export interface SelectionVisual {
   // The rect the handles sit on (rotated for a single element): the 1.5 px outline. A single element's
   // carries its corner radius, a multi-selection's box is square.
@@ -36,13 +37,14 @@ export interface SelectionVisual {
 
 const noop = (): void => {};
 
+/** The canvas layer that draws the selection, handles, marquee and guides. */
 export class OverlayLayer {
   readonly container = new Container();
   private readonly g = new Graphics();
   private theme: Theme;
   private selection: SelectionVisual | null = null;
   private hover: OutlineRect | null = null;
-  private marquee: Box | null = null;
+  private marquee: Aabb | null = null;
   private dirty = true;
   private lastCam = { tx: NaN, ty: NaN, scale: NaN };
   private readonly guides: GuideLayer;
@@ -87,7 +89,7 @@ export class OverlayLayer {
   }
 
   // World-space box.
-  setMarquee(b: Box | null): void {
+  setMarquee(b: Aabb | null): void {
     if (b === null && this.marquee === null) return;
     this.marquee = b;
     this.invalidate();

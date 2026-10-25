@@ -5,7 +5,7 @@ vi.hoisted(() => {
   HTMLCanvasElement.prototype.getContext = (() => null) as never;
 });
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { absoluteUrl, TextureManager, type WantedItem } from '../../src/render/textures';
+import { absoluteUrl, hasPrivateUpload, TextureManager, type TextureError, type WantedItem } from '../../src/render/textures';
 import type { BoardCard } from '../../src/render/types';
 
 class FakeWorker {
@@ -249,5 +249,209 @@ describe('TextureManager decode / upload', () => {
     calls.length = 0;
     land(3, 100, 70);
     expect(calls).toHaveLength(1);
+  });
+});
+
+// Failures that reach the host: a picture that would not load, a worker that died.
+describe('TextureManager errors', () => {
+  let errors: TextureError[];
+  let em: TextureManager;
+  const make = (workers: number) => {
+    tm.dispose();
+    FakeWorker.all = [];
+    errors = [];
+    em = tm = new TextureManager({ texture: {}, gl: {} } as never, {
+      budgetBytes: 1 << 30,
+      workers,
+      onWake: () => {},
+      onError: (e) => errors.push(e),
+    });
+    return FakeWorker.all;
+  };
+  const loads = (w: FakeWorker) => w.sent.filter((m) => m.op === 'load');
+  const fail = (w: FakeWorker, rid: number) => w.reply({ op: 'fail', rid, reason: 'HTTP 404', aborted: false });
+
+  it('reports a failed picture with its card slot and URL, once however often it is retried', () => {
+    const [w] = make(1);
+    em.setWanted(want(1), 0);
+    fail(w, loads(w)[0].rid);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ kind: 'texture', slot: 1, url: 'https://x.test/1.jpg' });
+    expect((errors[0].cause as Error).message).toBe('HTTP 404');
+    // The retry window passes, the same URL fails again: no second report.
+    em.setWanted(want(1), 60_000);
+    fail(w, loads(w)[1].rid);
+    expect(errors).toHaveLength(1);
+  });
+
+  it('does not report a request the stage cancelled', () => {
+    const [w] = make(1);
+    em.setWanted(want(1));
+    w.reply({ op: 'fail', rid: loads(w)[0].rid, reason: 'aborted', aborted: true });
+    expect(errors).toHaveLength(0);
+  });
+
+  it('reports again for a card slot that was forgotten and reused', () => {
+    const [w] = make(1);
+    em.setWanted(want(1), 0);
+    fail(w, loads(w)[0].rid);
+    em.forget(1);
+    em.setWanted(want(1), 0);
+    fail(w, loads(w)[1].rid);
+    expect(errors).toHaveLength(2);
+  });
+
+  it('moves the in-flight jobs of a dead worker to the live ones', () => {
+    const [a, b] = make(2);
+    em.setWanted(want(1, 2, 3, 4), 0);
+    expect(loads(a).length + loads(b).length).toBe(4);
+    a.onerror?.({ message: 'boom' });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ kind: 'worker' });
+    expect(em.workerCount).toBe(1);
+    // The two jobs a had started were sent again to b, next to its own two.
+    expect(loads(b)).toHaveLength(4);
+    const rids = new Set(loads(b).map((m) => m.rid));
+    for (const m of loads(a)) expect(rids.has(m.rid)).toBe(true);
+    expect(em.inflightCount).toBe(4);
+    // And they still land.
+    b.reply({ op: 'fail', rid: loads(b)[0].rid, reason: 'x', aborted: false });
+    expect(em.inflightCount).toBe(3);
+  });
+
+  it('with no worker left drops every job, reports one worker error and dispatches nothing more', () => {
+    const [w] = make(1);
+    em.setWanted(want(1, 2, 3, 4, 5, 6), 0);
+    expect(em.inflightCount).toBe(4);
+    expect(em.queued).toBe(2);
+    w.onerror?.({ message: 'boom' });
+    expect(errors.map((e) => e.kind)).toEqual(['worker']);
+    expect(em.inflightCount).toBe(0);
+    expect(em.queued).toBe(0);
+    expect(em.workerCount).toBe(0);
+    const sent = w.sent.length;
+    em.setWanted(want(7, 8), 0);
+    expect(em.queued).toBe(0);
+    expect(w.sent).toHaveLength(sent);
+    // A second error from the same dead worker is not reported again.
+    w.onerror?.({ message: 'boom' });
+    expect(errors).toHaveLength(1);
+  });
+
+  it('terminates every worker on dispose, dead ones included, and stays quiet after', () => {
+    const [a, b] = make(2);
+    const ta = vi.spyOn(a, 'terminate');
+    const tb = vi.spyOn(b, 'terminate');
+    a.onerror?.({ message: 'boom' });
+    expect(ta).toHaveBeenCalledTimes(1);
+    em.dispose();
+    expect(tb).toHaveBeenCalledTimes(1);
+    errors.length = 0;
+    b.onerror?.({ message: 'late' });
+    expect(errors).toHaveLength(0);
+  });
+
+  it('terminates the workers it started when a later one cannot be made', () => {
+    tm.dispose();
+    FakeWorker.all = [];
+    let n = 0;
+    class Flaky extends FakeWorker {
+      constructor(...args: unknown[]) {
+        super(...args);
+        if (++n === 2) throw new Error('bad worker url');
+      }
+    }
+    vi.stubGlobal('Worker', Flaky);
+    const spy = vi.spyOn(FakeWorker.prototype, 'terminate');
+    expect(
+      () => new TextureManager({ texture: {}, gl: {} } as never, { budgetBytes: 1, workers: 3, onWake: () => {} }),
+    ).toThrow('bad worker url');
+    expect(spy).toHaveBeenCalledTimes(1);
+    tm = new TextureManager({ texture: {}, gl: {} } as never, { budgetBytes: 1, workers: 0, onWake: () => {} });
+  });
+});
+
+describe('hasPrivateUpload', () => {
+  const full = () => ({ _activateLocation: () => {}, _setBoundTexture: () => {}, _premultiplyAlpha: false });
+  afterEach(() => {
+    delete (globalThis as { __corkboardForcePublicUpload?: boolean }).__corkboardForcePublicUpload;
+  });
+
+  it('is true only when all three Pixi internals exist with the expected types', () => {
+    expect(hasPrivateUpload(full())).toBe(true);
+    expect(hasPrivateUpload({ ...full(), _activateLocation: undefined })).toBe(false);
+    expect(hasPrivateUpload({ ...full(), _setBoundTexture: 'nope' })).toBe(false);
+    expect(hasPrivateUpload({ ...full(), _premultiplyAlpha: undefined })).toBe(false);
+    expect(hasPrivateUpload({ ...full(), _premultiplyAlpha: 1 })).toBe(false);
+    expect(hasPrivateUpload({})).toBe(false);
+    expect(hasPrivateUpload(null)).toBe(false);
+  });
+
+  it('can be forced off for tests', () => {
+    (globalThis as { __corkboardForcePublicUpload?: boolean }).__corkboardForcePublicUpload = true;
+    expect(hasPrivateUpload(full())).toBe(false);
+  });
+});
+
+// Pixi renamed its internals: the manager must still upload, through the public bind and a restored pixel-store flag.
+describe('TextureManager public upload fallback', () => {
+  const RGBA = 6408;
+  const UBYTE = 5121;
+  const PREMUL = 37441;
+  let gls: unknown[][];
+  let bound: unknown[];
+  let premul: boolean;
+  let m: TextureManager;
+
+  beforeEach(() => {
+    gls = [];
+    bound = [];
+    premul = false;
+    FakeWorker.all = [];
+    const gl = {
+      RGBA,
+      UNSIGNED_BYTE: UBYTE,
+      UNPACK_PREMULTIPLY_ALPHA_WEBGL: PREMUL,
+      bindTexture: () => {},
+      getParameter: (p: number) => (p === PREMUL ? premul : null),
+      pixelStorei: (p: number, v: boolean) => {
+        if (p === PREMUL) premul = v;
+        gls.push(['pixelStorei', p, v]);
+      },
+      generateMipmap: () => {},
+      texSubImage2D: (...a: unknown[]) => gls.push(['texSubImage2D', premul, ...a]),
+    };
+    // No `_activateLocation` / `_setBoundTexture` / `_premultiplyAlpha`: only the public API.
+    const texSys = {
+      getGlSource: () => ({ target: 3553, texture: {} }),
+      initSource: () => {},
+      unbind: (...a: unknown[]) => bound.push(['unbind', ...a]),
+      bind: (...a: unknown[]) => bound.push(['bind', ...a]),
+    };
+    m = new TextureManager({ texture: texSys, gl } as never, { budgetBytes: 1 << 30, workers: 1, onWake: () => {} });
+  });
+  afterEach(() => m.dispose());
+
+  it('uploads the bitmap premultiplied through texture.bind, then restores the flag', () => {
+    m.setWanted(want(1));
+    const [w] = FakeWorker.all;
+    const rid = w.sent.find((s) => s.op === 'load')!.rid;
+    w.reply({ op: 'done', rid, bitmap: { width: 100, height: 80, close: () => {} }, w: 100, h: 80, fetched: 1, decodeMs: 1 });
+    expect(() => m.frame(1000, 0)).not.toThrow();
+    expect(m.has(card(1), 1)).toBe(true);
+    const subs = gls.filter((c) => c[0] === 'texSubImage2D');
+    expect(subs).toHaveLength(1);
+    // Premultiplied while uploading ...
+    expect(subs[0][1]).toBe(true);
+    // ... and back to what Pixi believes afterwards.
+    expect(premul).toBe(false);
+    // The page was bound through the public API, at unit 0.
+    expect(bound.length).toBeGreaterThan(0);
+    expect(bound.filter((b) => (b as unknown[])[0] === 'bind').every((b) => (b as unknown[])[2] === 0)).toBe(true);
+    // Dropped from Pixi's cache first, right before each bind: a cached `bind` would skip `activeTexture(0)` and
+    // the upload would land in whichever texture the last batch left on the active unit (see the e2e suite).
+    const kinds = bound.map((b) => (b as unknown[])[0]);
+    expect(kinds.length % 2).toBe(0);
+    for (let i = 0; i < kinds.length; i += 2) expect(kinds.slice(i, i + 2)).toEqual(['unbind', 'bind']);
   });
 });

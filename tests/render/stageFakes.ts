@@ -19,7 +19,25 @@ export interface FakeApp {
   destroyed: boolean;
 }
 
-export const fake: { app: FakeApp | null } = { app: null };
+// `initError` makes the next `init` reject; `rendererType` is what Pixi "picked" (1 = WebGL); `webgl2` whether
+// the context is a WebGL2 one.
+export const fake: {
+  app: FakeApp | null;
+  initError: unknown;
+  // `init` waits for it: a test aborts a `create` while Pixi is still starting.
+  initGate: Promise<void> | null;
+  rendererType: number;
+  webgl2: boolean;
+} = {
+  app: null,
+  initError: null,
+  initGate: null,
+  rendererType: 1,
+  webgl2: true,
+};
+
+// Stands for the page's WebGL2RenderingContext (the stage checks the context against it).
+export class FakeGL2 {}
 
 export function withFakeApplication(real: Pixi): Pixi {
   class FakeApplication implements FakeApp {
@@ -32,6 +50,7 @@ export function withFakeApplication(real: Pixi): Pixi {
     glUploads: unknown[][] = [];
     destroyed = false;
     renderer = {
+      type: fake.rendererType,
       resize: (w: number, h: number, dpr: number) => this.resize(w, h, dpr),
       background: { color: 0 },
       texture: {
@@ -41,7 +60,7 @@ export function withFakeApplication(real: Pixi): Pixi {
         _setBoundTexture: () => {},
         _premultiplyAlpha: true,
       },
-      gl: {
+      gl: Object.assign(fake.webgl2 ? new FakeGL2() : {}, {
         RENDERER: 7937,
         getExtension: () => null,
         getParameter: () => 'fake',
@@ -52,13 +71,15 @@ export function withFakeApplication(real: Pixi): Pixi {
         pixelStorei: () => {},
         generateMipmap: () => {},
         texSubImage2D: (...a: unknown[]) => this.glUploads.push(a),
-      },
+      }),
     };
     constructor() {
       fake.app = this;
     }
     async init(o: Record<string, unknown>): Promise<void> {
       this.initOptions = o;
+      if (fake.initGate) await fake.initGate;
+      if (fake.initError) throw fake.initError;
     }
     render(): void {
       this.renders++;
@@ -117,6 +138,11 @@ export interface Dom {
 export function installDom(w = 800, h = 600): Dom {
   FakeWorker.all = [];
   fake.app = null;
+  fake.initError = null;
+  fake.initGate = null;
+  fake.rendererType = 1;
+  fake.webgl2 = true;
+  vi.stubGlobal('WebGL2RenderingContext', FakeGL2);
   const frames: FrameRequestCallback[] = [];
   let ts = 0;
   vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {

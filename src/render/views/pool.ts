@@ -1,15 +1,16 @@
 // Per-variant pools of element views: a view is expensive to build (Pixi objects) and cheap to reuse,
 // and the viewport turns over hundreds of elements during a pan.
-import type { ElementKind } from '../../types';
+import type { CardKind } from '../../types';
 import { VIEW_DEFINITIONS, type ViewDefinition } from './registry';
-import type { ElementView } from './view';
+import type { CardView } from './view';
 
+/** Pools of card views, reused as cards enter and leave the viewport. */
 export class ViewPools {
-  private readonly pools = new Map<string, ElementView[]>();
+  private readonly pools = new Map<string, CardView[]>();
   private created = 0;
   private reused = 0;
 
-  acquire(kind: ElementKind): ElementView {
+  acquire(kind: CardKind): CardView {
     const def = VIEW_DEFINITIONS[kind];
     const v = this.pools.get(def.variant)?.pop();
     if (v) {
@@ -20,7 +21,7 @@ export class ViewPools {
     return def.create();
   }
 
-  release(view: ElementView): void {
+  release(view: CardView): void {
     let pool = this.pools.get(view.variant);
     if (!pool) {
       pool = [];
@@ -40,4 +41,4 @@ export class ViewPools {
   }
 }
 
-export const definitionOf = (kind: ElementKind): ViewDefinition => VIEW_DEFINITIONS[kind];
+export const definitionOf = (kind: CardKind): ViewDefinition => VIEW_DEFINITIONS[kind];

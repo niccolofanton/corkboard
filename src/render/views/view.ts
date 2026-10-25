@@ -9,9 +9,10 @@
 // element's own (0, 0, w, h) space.
 import type { Container } from 'pixi.js';
 import { DEG, type WorldRect } from '../../interact/geometry';
-import type { Element, ElementKind } from '../../types';
+import type { Card, CardKind } from '../../types';
 import type { Theme } from '../theme';
 
+/** What a card view is drawn with. */
 export interface ViewCtx {
   theme: Theme;
   dpr: number;
@@ -24,19 +25,20 @@ export interface ViewCtx {
   invalidate(): void;
 }
 
-export interface ElementView {
-  readonly kind: ElementKind;
+/** The Pixi view of one card. */
+export interface CardView {
+  readonly kind: CardKind;
   // Which pool the view lives in (one per `ViewDefinition`).
   readonly variant: string;
   readonly display: Container;
-  el: Element | null;
+  el: Card | null;
   // Last stage pass that found this view still near the viewport (set by the stage).
   mark: number;
   // Fill from `el` (acquired from the pool) at the given WORLD rect.
-  mount(el: Element, rect: WorldRect, ctx: ViewCtx): void;
+  mount(el: Card, rect: WorldRect, ctx: ViewCtx): void;
   // The element changed in the store. `props` are the changed property names; `rect` is the (possibly
   // previewed) world rect.
-  update(el: Element, props: readonly string[], rect: WorldRect, ctx: ViewCtx): void;
+  update(el: Card, props: readonly string[], rect: WorldRect, ctx: ViewCtx): void;
   // Geometry only (a drag / resize preview, or a committed move): cheap.
   setRect(rect: WorldRect): void;
   // The theme changed: re-derive colours.

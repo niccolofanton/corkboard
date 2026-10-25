@@ -9,21 +9,27 @@ vi.mock('../../src/embed/tile', async (orig) => ({
 }));
 import { EmbedLayer, type EmbedEvents, type EmbedLayerDeps } from '../../src/embed/layer';
 import { MIN_LIVE_SCALE } from '../../src/embed/policy';
+import type { ResolvedEmbed } from '../../src/embed/resolve';
+import { SNIPPET_CSP, SNIPPET_CSP_NONE } from '../../src/embed/sandbox';
+import { CorkboardError } from '../../src/errors';
 import {
   CULL_SNAPSHOT_MIN_MS,
   CULL_SNAPSHOT_MS,
   LOAD_SLOT_MS,
   MAX_LOADING,
   MAX_SNAPSHOTS,
+  NAV_STRIKE_MS,
+  NAV_STRIKES,
   PREVIEW_JOB_MS,
   PREVIEW_SETTLE_MS,
+  SNAPSHOT_MAX_SVG,
 } from '../../src/embed/layer';
 import { createElement } from '../../src/model';
 import { FrameRateMonitor } from '../../src/render/frameRate';
 import { DARK_THEME } from '../../src/render/theme';
 import type { Stage } from '../../src/render/stage';
 import { Store } from '../../src/store';
-import type { ElementInit } from '../../src/types';
+import type { CardInit } from '../../src/types';
 
 const VIEW = { w: 1600, h: 1000 };
 // jsdom fires a `load` of its own on every iframe it attaches, a turn after the layer mounts it. The layer treats
@@ -77,9 +83,9 @@ function fakeStage(store: Store, scale = 1, maxScale = 4) {
       cam.tx = (VIEW.w - w * k) / 2 - r.x0 * k;
       cam.ty = (VIEW.h - h * k) / 2 - r.y0 * k;
     }),
-    contentBounds: (ids: string[]) => {
-      const el = store.get(ids[0])!;
-      return { x0: el.x, y0: el.y, x1: el.x + el.w, y1: el.y + el.h };
+    boundsOf: (ids: string[]) => {
+      const el = store.get(ids[0]);
+      return el ? { x0: el.x, y0: el.y, x1: el.x + el.w, y1: el.y + el.h } : undefined;
     },
   };
   stageOf.set(store, stage);
@@ -87,7 +93,7 @@ function fakeStage(store: Store, scale = 1, maxScale = 4) {
 }
 
 let n = 0;
-const embed = (init: Partial<ElementInit> & Pick<ElementInit, 'media'>) =>
+const embed = (init: Partial<CardInit> & Pick<CardInit, 'media'>) =>
   createElement({ w: 480, h: 300, x: 0, y: 0, ...init }, `e${n++}`);
 
 let host: HTMLElement;
@@ -1038,7 +1044,7 @@ describe('EmbedLayer', () => {
       URL.revokeObjectURL = realRevoke;
     });
 
-    const snippet = (i = 0, init: Partial<ElementInit> = {}) =>
+    const snippet = (i = 0, init: Partial<CardInit> = {}) =>
       embed({ media: { embed: { html: `<i>${i}</i>` } }, w: 480, h: 300, x: i * 500, ...init });
     // The iframe a snippet card mounted, found by its content, loaded, with a spy on what it is sent.
     const frameOf = (i: number) =>
@@ -1052,8 +1058,8 @@ describe('EmbedLayer', () => {
     const wrapperOf = (f: HTMLIFrameElement) => f.parentElement as HTMLElement;
 
     // One snippet card, loaded, shrunk to a 96 x 60 px card and settled: the snapshot request is out.
-    const small = (opts: object = {}) => {
-      const t = make(1, { ...ALL, ...opts });
+    const small = (opts: object = {}, deps: Partial<EmbedLayerDeps> = {}) => {
+      const t = make(1, { ...ALL, ...opts }, 4, deps);
       const el = snippet();
       t.store.add([el]);
       t.tick();
@@ -1402,71 +1408,27 @@ describe('EmbedLayer', () => {
       expect(ops(posts[first], 'snapshot')).toHaveLength(1);
     });
 
+    it('treats a snapshot reply over 2 MB as a failed snapshot, and draws one at the limit', async () => {
+      const rasterize = vi.fn(async () => blob());
+      const { layer, el, f, post, tick } = small({}, { rasterize });
+      const [req] = ops(post, 'snapshot');
+      reply(f, { cb: CB, op: 'snapshot', id: req.id, ok: true, svg: 'x'.repeat(SNAPSHOT_MAX_SVG + 1) });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rasterize).not.toHaveBeenCalled();
+      expect(layer.frozen.has(el.id)).toBe(false);
+      // A failure like any other: the frame is asked again later.
+      vi.advanceTimersByTime(2000);
+      tick();
+      const asked = ops(post, 'snapshot');
+      expect(asked).toHaveLength(2);
+      reply(f, { cb: CB, op: 'snapshot', id: asked[1].id, ok: true, svg: 'x'.repeat(SNAPSHOT_MAX_SVG) });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rasterize).toHaveBeenCalledTimes(1);
+    });
+
+    // A snippet's frame that loads again is put back to its document (see 'snippet navigation'). What a new
+    // document must be told again only matters to frames that may legitimately navigate.
     describe('a frame that loads again', () => {
-      it('is sent its pause again: the new document knows nothing of the old one', () => {
-        const t = make(1, { ...ALL, freezePx: 0 });
-        t.store.add([snippet(0), snippet(1)]);
-        t.tick();
-        const fs = [frameOf(0), frameOf(1)];
-        const posts = fs.map(spy);
-        fs.forEach(load);
-        t.layer.setOptions({ maxLive: 1 });
-        t.tick();
-        const i = fs.findIndex((f) => wrapperOf(f).dataset.parked !== undefined);
-        expect(i).toBeGreaterThanOrEqual(0);
-        expect(ops(posts[i], 'pause')).toHaveLength(1);
-        // The snippet reloads itself.
-        load(fs[i]);
-        expect(ops(posts[i], 'pause')).toHaveLength(2);
-        expect(ops(posts[1 - i], 'pause')).toHaveLength(0);
-        // A frame that was running is not told anything it did not need to hear.
-        load(fs[1 - i]);
-        expect(posts[1 - i].mock.calls).toEqual([]);
-        // And a resume goes out as usual afterwards.
-        t.layer.setOptions({ maxLive: 2 });
-        t.tick();
-        expect(ops(posts[i], 'resume')).toHaveLength(1);
-      });
-
-      it('drops the snapshot of the old document and asks the new one', () => {
-        const { store, el, f, post, w, tick } = small();
-        const [req] = ops(post, 'snapshot');
-        load(f);
-        // The reply of the old document is not a picture of the new one.
-        reply(f, { cb: CB, op: 'snapshot', id: req.id, ok: true, svg: SVG });
-        expect(posterOf(store, el.id)).toBeUndefined();
-        tick();
-        const asked = ops(post, 'snapshot');
-        expect(asked).toHaveLength(2);
-        expect(asked[1].id).not.toBe(req.id);
-        expect(w.dataset.frozen).toBeUndefined();
-      });
-
-      it('keeps a frozen frame frozen, and pauses the new document', async () => {
-        const { layer, el, f, post, w, tick } = small();
-        await answer(f, ops(post, 'snapshot')[0].id);
-        land();
-        expect(layer.frozen.has(el.id)).toBe(true);
-        expect(ops(post, 'pause')).toHaveLength(1);
-        load(f);
-        tick();
-        expect(layer.frozen.has(el.id)).toBe(true);
-        expect(w.dataset.frozen).toBeDefined();
-        expect(ops(post, 'pause')).toHaveLength(2);
-        // Its picture is still the poster: nothing is asked.
-        expect(ops(post, 'snapshot')).toHaveLength(1);
-      });
-
-      it('forgets that the last snapshot failed: the new document gets its tries', () => {
-        const { f, post, tick } = small();
-        reply(f, { cb: CB, op: 'snapshot', id: ops(post, 'snapshot')[0].id, ok: false });
-        tick();
-        expect(ops(post, 'snapshot')).toHaveLength(1);
-        load(f);
-        tick();
-        expect(ops(post, 'snapshot')).toHaveLength(2);
-      });
-
       it('does not leak the timer of a video player\'s first load', () => {
         const t = make(1, { ...ALL, autoplay: true });
         t.store.add([embed({ media: { embed: { url: 'https://youtu.be/aqz-KE-bpKQ' } }, w: 480, h: 270 })]);
@@ -1846,9 +1808,9 @@ describe('EmbedLayer', () => {
 
     describe('video players', () => {
       const YT = 'https://www.youtube-nocookie.com';
-      const video = (url: string, init: Partial<ElementInit> = {}) =>
+      const video = (url: string, init: Partial<CardInit> = {}) =>
         embed({ media: { embed: { url } }, w: 480, h: 270, ...init });
-      const one = (url: string, opts: object = {}, init: Partial<ElementInit> = {}) => {
+      const one = (url: string, opts: object = {}, init: Partial<CardInit> = {}) => {
         const t = make(1, { ...ALL, ...opts });
         const el = video(url, init);
         t.store.add([el]);
@@ -2044,7 +2006,7 @@ describe('EmbedLayer', () => {
       };
       return { store, layer, cam, clock, tick, monitor };
     }
-    const snippet = (i: number, init: Partial<ElementInit> = {}) =>
+    const snippet = (i: number, init: Partial<CardInit> = {}) =>
       embed({ media: { embed: { html: `<i>${i}</i>` } }, w: 480, h: 300, x: i * 500, ...init });
     const frameOf = (i: number) =>
       [...root.querySelectorAll<HTMLIFrameElement>('.cb-embed iframe')].find((f) => f.getAttribute('srcdoc')?.includes(`<i>${i}</i>`)) as HTMLIFrameElement;
@@ -2597,7 +2559,7 @@ describe('EmbedLayer', () => {
       URL.revokeObjectURL = realRevoke;
     });
 
-    const snip = (i: number, init: Partial<ElementInit> = {}) =>
+    const snip = (i: number, init: Partial<CardInit> = {}) =>
       embed({ media: { embed: { html: `<i>${i}</i>` } }, w: 480, h: 300, x: i * 500, ...init });
     const studios = () => [...document.querySelectorAll<HTMLIFrameElement>('body > div[aria-hidden="true"] > iframe')];
     const studioOf = (i: number) => studios().find((f) => f.getAttribute('srcdoc')?.includes(`<i>${i}</i>`));
@@ -2620,7 +2582,7 @@ describe('EmbedLayer', () => {
       await vi.advanceTimersByTimeAsync(0);
       return req!;
     };
-    const setup = (opts: object = {}, deps: Partial<EmbedLayerDeps> = {}, cards: ElementInit[] = []) => {
+    const setup = (opts: object = {}, deps: Partial<EmbedLayerDeps> = {}, cards: CardInit[] = []) => {
       const rasterize = vi.fn(async () => img());
       const t = make(1, { ...NONE, ...opts }, 4, { rasterize, ...deps });
       const els = cards.map((c) => c as ReturnType<typeof snip>);
@@ -2922,6 +2884,16 @@ describe('EmbedLayer', () => {
       expect(t.layer.previewsPending).toBe(1);
     });
 
+    it('treats a studio reply over 2 MB as a failed job: nothing is drawn', async () => {
+      const t = setup({ previewWorkers: 1 }, {}, [snip(0)]);
+      const f = studios()[0];
+      const { req } = ask(f);
+      reply(f, { cb: CB, op: 'snapshot', id: req!.id, ok: true, svg: 'x'.repeat(SNAPSHOT_MAX_SVG + 1) });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.rasterize).not.toHaveBeenCalled();
+      expect(srcOf(t, 0)).toBeUndefined();
+    });
+
     describe('cache', () => {
       let stored: Map<string, Blob>;
       const put = vi.fn();
@@ -2948,23 +2920,30 @@ describe('EmbedLayer', () => {
 
       it('a hit in Cache Storage applies the picture without loading the snippet', async () => {
         const first = setup({ previewWorkers: 1, ...PERSIST }, {}, [snip(0)]);
-        await vi.advanceTimersByTimeAsync(0);
+        await vi.waitFor(() => expect(studios()).toHaveLength(1));
         await render(studios()[0]);
-        await vi.advanceTimersByTimeAsync(0);
-        expect(open).toHaveBeenCalledWith('corkboard-previews-v1');
+        await vi.waitFor(() => expect(put).toHaveBeenCalledTimes(1));
+        expect(open).toHaveBeenCalledWith('corkboard-previews-v2');
         expect(put).toHaveBeenCalledTimes(1);
-        expect(put.mock.calls[0][0]).toMatch(/\/__corkboard_preview\/[0-9a-f]{16}$/);
+        expect(put.mock.calls[0][0]).toMatch(/\/__corkboard_preview\/[0-9a-f]{64}$/);
         expect(stored.size).toBe(1);
         first.layer.dispose();
         // A new page: the same snippet is found, nothing is rendered.
         const t = setup({ previewWorkers: 1, ...PERSIST }, {}, [snip(0)]);
         expect(t.layer.previewsPending).toBe(1);
-        await vi.advanceTimersByTimeAsync(0);
+        await vi.waitFor(() => expect(t.layer.previewsPending).toBe(0));
         expect(studios()).toHaveLength(0);
         expect(t.rasterize).not.toHaveBeenCalled();
         expect(t.layer.previewsPending).toBe(0);
         expect(posterOf(t.store, t.els[0].id)).toMatch(/^blob:pv-/);
         expect(put).toHaveBeenCalledTimes(1);
+      });
+
+      it('uses the cache name it is given', async () => {
+        setup({ previewWorkers: 1, previewCache: { persistent: true, name: 'board-a' } }, {}, [snip(0)]);
+        // The entry name is a real SHA-256, which resolves outside the fake clock.
+        await vi.waitFor(() => expect(open).toHaveBeenCalledWith('board-a'));
+        expect(open).not.toHaveBeenCalledWith('corkboard-previews-v2');
       });
 
       it('does not touch Cache Storage by default (memory), and works without it', async () => {
@@ -2983,10 +2962,449 @@ describe('EmbedLayer', () => {
       it('survives a Cache Storage that throws', async () => {
         vi.stubGlobal('caches', { open: async () => { throw new Error('private mode'); } });
         const t = setup({ previewWorkers: 1, ...PERSIST }, {}, [snip(0)]);
-        await vi.advanceTimersByTimeAsync(0);
+        await vi.waitFor(() => expect(studios()).toHaveLength(1));
         await render(studios()[0]);
         expect(posterOf(t.store, t.els[0].id)).toMatch(/^blob:pv-/);
       });
+    });
+  });
+
+  describe('snippet network policy', () => {
+    const html = () => embed({ media: { embed: { html: '<b>hi</b>' } } });
+
+    it('snippetNetwork defaults to images and none drops https from img-src and font-src', () => {
+      const a = make();
+      a.store.add([html()]);
+      a.tick();
+      expect(a.frames()[0].getAttribute('srcdoc')).toContain('img-src data: https:');
+      expect(a.frames()[0].getAttribute('srcdoc')).toContain('font-src https: data:');
+      a.layer.dispose();
+      document.body.innerHTML = '<div id="host" tabindex="0"><div id="root"></div></div>';
+      host = document.getElementById('host') as HTMLElement;
+      root = document.getElementById('root') as HTMLElement;
+      const b = make(1, { snippetNetwork: 'none' });
+      b.store.add([html()]);
+      b.tick();
+      const doc = b.frames()[0].getAttribute('srcdoc') as string;
+      expect(doc).toContain("img-src data: blob:;");
+      expect(doc).toContain('font-src data:"');
+      expect(doc).not.toContain('https:');
+    });
+
+    it('setOptions applies to frames mounted afterwards; a live frame keeps its document', () => {
+      const t = make(1, { maxLive: 1 });
+      const first = html();
+      t.store.add([first]);
+      t.tick();
+      const live = t.frames()[0];
+      t.layer.setOptions({ snippetNetwork: 'none' });
+      t.tick();
+      // Same iframe, same policy.
+      expect(t.frames()[0]).toBe(live);
+      expect(live.getAttribute('srcdoc')).toContain('img-src data: https:');
+      t.store.remove([first.id]);
+      t.store.add([html()]);
+      t.tick();
+      expect(t.frames()[0].getAttribute('srcdoc')).toContain('img-src data: blob:;');
+    });
+  });
+
+  describe('isolatedHosts', () => {
+    const page = (url: string) => embed({ media: { embed: { url } } });
+    const sandbox = (t: ReturnType<typeof make>) => t.frames()[0].getAttribute('sandbox') as string;
+
+    it('drops allow-same-origin for a listed host and its subdomains, case-insensitively, with or without a leading dot', () => {
+      for (const [entry, url] of [
+        ['example.com', 'https://example.com/a'],
+        ['.example.com', 'https://app.Example.com/a'],
+        ['EXAMPLE.COM', 'https://deep.app.example.com/a'],
+      ] as const) {
+        document.body.innerHTML = '<div id="host" tabindex="0"><div id="root"></div></div>';
+        host = document.getElementById('host') as HTMLElement;
+        root = document.getElementById('root') as HTMLElement;
+        const t = make(1, { isolatedHosts: [entry] });
+        t.store.add([page(url)]);
+        t.tick();
+        expect(sandbox(t)).toBe('allow-scripts allow-forms allow-popups');
+        t.layer.dispose();
+      }
+    });
+
+    it('leaves other hosts alone, including look-alikes', () => {
+      for (const url of ['https://other.org/', 'https://notexample.com/', 'https://example.com.evil.org/']) {
+        document.body.innerHTML = '<div id="host" tabindex="0"><div id="root"></div></div>';
+        host = document.getElementById('host') as HTMLElement;
+        root = document.getElementById('root') as HTMLElement;
+        const t = make(1, { isolatedHosts: ['example.com'] });
+        t.store.add([page(url)]);
+        t.tick();
+        expect(sandbox(t)).toContain('allow-same-origin');
+        t.layer.dispose();
+      }
+    });
+
+    it('normalises the entries once: URLs, ports, IDNs and IPv6 work, an IP literal is never a suffix', () => {
+      for (const [entry, url, isolated] of [
+        ['https://example.com/', 'https://app.example.com/a', true],
+        ['*.example.com', 'https://example.com/', true],
+        ['example.com:443', 'https://example.com/', true],
+        ['bücher.de', 'https://www.bücher.de/', true],
+        ['::1', 'http://[::1]:3000/', true],
+        ['0.1', 'http://127.0.0.1/', false],
+        ['127.0.0.1', 'http://127.0.0.1:8080/', true],
+      ] as const) {
+        document.body.innerHTML = '<div id="host" tabindex="0"><div id="root"></div></div>';
+        host = document.getElementById('host') as HTMLElement;
+        root = document.getElementById('root') as HTMLElement;
+        const t = make(1, { isolatedHosts: [entry] });
+        t.store.add([page(url)]);
+        t.tick();
+        expect(sandbox(t).includes('allow-same-origin'), `${entry} vs ${url}`).toBe(!isolated);
+        t.layer.dispose();
+      }
+    });
+
+    it('throws CorkboardError("invalid") for an entry that is no host, from the constructor and from setOptions (which then changes nothing)', () => {
+      expect(() => make(1, { isolatedHosts: ['example.com/path'] })).toThrow(CorkboardError);
+      document.body.innerHTML = '<div id="host" tabindex="0"><div id="root"></div></div>';
+      host = document.getElementById('host') as HTMLElement;
+      root = document.getElementById('root') as HTMLElement;
+      const t = make(1, { isolatedHosts: ['example.com'], maxLive: 5 });
+      t.store.add([page('https://example.com/')]);
+      t.tick();
+      const f = t.frames()[0];
+      expect(() => t.layer.setOptions({ maxLive: 2, isolatedHosts: ['good.org', 'user:pw@bad.org'] })).toThrow(CorkboardError);
+      expect(t.frames()[0]).toBe(f);
+      expect(t.layer.maxLive).toBe(5);
+      // Still the old list.
+      t.layer.setOptions({ isolatedHosts: ['EXAMPLE.com'] });
+      expect(t.frames()[0]).toBe(f);
+    });
+
+    it('covers providers too, and setOptions remounts the frame with the new sandbox', () => {
+      const t = make();
+      t.store.add([embed(yt())]);
+      t.tick();
+      expect(sandbox(t)).toContain('allow-same-origin');
+      t.layer.setOptions({ isolatedHosts: ['youtube-nocookie.com'] });
+      expect(t.frames()).toHaveLength(0);
+      t.tick();
+      expect(sandbox(t)).toBe('allow-scripts allow-forms allow-popups allow-presentation');
+      // Same list again: nothing to remount.
+      const f = t.frames()[0];
+      t.layer.setOptions({ isolatedHosts: ['youtube-nocookie.com'] });
+      expect(t.frames()[0]).toBe(f);
+    });
+  });
+
+  describe('snippet navigation', () => {
+    const snippet = () => embed({ media: { embed: { html: '<b>hi</b>' } } });
+    const errors = () => events.filter(([type]) => type === 'error').map(([, p]) => p);
+    beforeEach(() => vi.useFakeTimers());
+
+    const load = (f: HTMLIFrameElement) => f.dispatchEvent(loadEvent());
+    // Counts the times the layer assigns the srcdoc again (puts the snippet's document back).
+    const restores = (f: HTMLIFrameElement) => {
+      const set = vi.spyOn(f, 'srcdoc', 'set');
+      return () => set.mock.calls.length;
+    };
+
+    const one = () => {
+      const t = make();
+      const el = snippet();
+      t.store.add([el]);
+      t.tick();
+      return { ...t, el, f: t.frames()[0] };
+    };
+
+    it('mounts a snippet with the iframe csp attribute (Embedded Enforcement), the page kinds without', () => {
+      const a = one();
+      expect(a.f.getAttribute('csp')).toBe(SNIPPET_CSP);
+      expect(a.f.getAttribute('srcdoc')).toContain(`content="${SNIPPET_CSP}"`);
+      a.layer.dispose();
+      document.body.innerHTML = '<div id="host" tabindex="0"><div id="root"></div></div>';
+      host = document.getElementById('host') as HTMLElement;
+      root = document.getElementById('root') as HTMLElement;
+      const p = make(1, { snippetNetwork: 'none' });
+      p.store.add([snippet(), embed({ media: { embed: { url: 'https://example.com/' } }, x: 600 })]);
+      p.tick();
+      const s = p.frames().find((f) => f.hasAttribute('srcdoc')) as HTMLIFrameElement;
+      const page = p.frames().find((f) => !f.hasAttribute('srcdoc')) as HTMLIFrameElement;
+      expect(s.getAttribute('csp')).toBe(SNIPPET_CSP_NONE);
+      expect(page.hasAttribute('csp')).toBe(false);
+    });
+
+    it('accepts the first load and does not touch the frame', () => {
+      const { f, frames } = one();
+      const n = restores(f);
+      load(f);
+      expect(n()).toBe(0);
+      expect(frames()).toHaveLength(1);
+      expect(f.parentElement?.hasAttribute('data-ready')).toBe(true);
+      expect(errors()).toEqual([]);
+    });
+
+    it('puts the snippet\'s document back after a load of the same window (a navigation), once per stray load, and the load of that document is not a strike', () => {
+      const { f, frames, el, layer } = one();
+      const n = restores(f);
+      load(f);
+      // A link followed: the same frame, another document.
+      load(f);
+      expect(n()).toBe(1);
+      // ... and ours loads again: accepted.
+      load(f);
+      expect(n()).toBe(1);
+      // Strikes are counted per stray load: this is the second.
+      load(f);
+      expect(n()).toBe(2);
+      load(f);
+      expect(n()).toBe(2);
+      expect(frames()).toHaveLength(1);
+      expect(layer.live.has(el.id)).toBe(true);
+      expect(errors()).toEqual([]);
+      expect(layer.info(el.id)?.blocked).toBeUndefined();
+    });
+
+    it('blocks the card on the 3rd stray load within 10 s: poster, an error event, info() says blocked', () => {
+      const { f, frames, el, layer, tick } = one();
+      const n = restores(f);
+      load(f);
+      for (let i = 1; i < NAV_STRIKES; i++) {
+        load(f); // stray
+        expect(frames()).toHaveLength(1);
+        load(f); // ours
+        vi.advanceTimersByTime(1000);
+      }
+      expect(n()).toBe(NAV_STRIKES - 1);
+      expect(errors()).toEqual([]);
+      load(f); // the last strike
+      expect(n()).toBe(NAV_STRIKES - 1); // no restore: the frame is gone
+      expect(frames()).toHaveLength(0);
+      expect(layer.live.has(el.id)).toBe(false);
+      expect(events).toContainEqual(['embedLive', { id: el.id, live: false }]);
+      expect(errors()).toEqual([{ kind: 'embed', id: el.id, cause: expect.objectContaining({ message: 'snippet navigated away from its document' }) }]);
+      const info = layer.info(el.id) as ResolvedEmbed;
+      expect(info).toMatchObject({ kind: 'html', frameable: false, blocked: true });
+      expect(Object.isFrozen(info)).toBe(true);
+      // Never again, and not by interact mode either.
+      layer.setSelection([el.id]);
+      tick();
+      expect(frames()).toHaveLength(0);
+      expect(layer.interact(el.id)).toBe(false);
+      expect(errors()).toHaveLength(1);
+    });
+
+    it('forgets strikes older than 10 s', () => {
+      const { f, frames, layer, el } = one();
+      load(f);
+      for (let i = 0; i < NAV_STRIKES * 2; i++) {
+        load(f); // stray
+        load(f); // ours
+        vi.advanceTimersByTime(NAV_STRIKE_MS / 2 + 1);
+      }
+      expect(frames()).toHaveLength(1);
+      expect(layer.live.has(el.id)).toBe(true);
+      expect(errors()).toEqual([]);
+    });
+
+    it('a looping snippet (navigates again right after each restore) is blocked within the window', () => {
+      const { f, frames } = one();
+      load(f);
+      let strays = 0;
+      while (frames().length > 0 && strays < 20) {
+        load(f); // the loop's stray load
+        strays++;
+        if (frames().length > 0) load(f); // the restored document
+        vi.advanceTimersByTime(50);
+      }
+      expect(strays).toBe(NAV_STRIKES);
+      expect(errors()).toHaveLength(1);
+    });
+
+    it('does not block a reparented frame: a new window is a new browsing context that reloads its srcdoc', () => {
+      const { f, frames, el, layer } = one();
+      const n = restores(f);
+      load(f);
+      for (let i = 0; i < NAV_STRIKES * 3; i++) {
+        const before = f.contentWindow;
+        host.appendChild(root);
+        expect(f.contentWindow).not.toBe(before);
+        load(f);
+        vi.advanceTimersByTime(100);
+      }
+      expect(n()).toBe(0);
+      expect(frames()).toHaveLength(1);
+      expect(layer.live.has(el.id)).toBe(true);
+      expect(errors()).toEqual([]);
+      // The new window is the one remembered: a stray load in it is a navigation again.
+      load(f);
+      expect(n()).toBe(1);
+    });
+
+    it('a reparent cancels a restore in flight (its load is the reloaded document, which is accepted)', () => {
+      const { f, frames } = one();
+      const n = restores(f);
+      load(f);
+      load(f); // stray: restoring
+      expect(n()).toBe(1);
+      host.appendChild(root);
+      load(f); // the reload in the new window
+      load(f); // stray again: a real strike, restored again
+      expect(n()).toBe(2);
+      expect(frames()).toHaveLength(1);
+    });
+
+    it('a content change makes the card a fresh one that can go live, with its own strikes', () => {
+      const { f, store, el, frames, tick, layer } = one();
+      load(f);
+      for (let i = 0; i < NAV_STRIKES; i++) {
+        load(f); // stray
+        if (frames().length > 0) load(f); // ours
+      }
+      tick();
+      expect(frames()).toHaveLength(0);
+      expect(layer.info(el.id)?.blocked).toBe(true);
+      // Not the content: the card stays blocked.
+      store.update(el.id, { w: 500 });
+      tick();
+      expect(frames()).toHaveLength(0);
+      expect(layer.info(el.id)?.blocked).toBe(true);
+      store.update(el.id, { media: { embed: { html: '<b>new</b>' } } });
+      tick();
+      expect(frames()).toHaveLength(1);
+      expect(layer.info(el.id)?.blocked).toBeUndefined();
+      expect(layer.info(el.id)?.frameable).toBe(true);
+      const g = frames()[0];
+      load(g);
+      load(g);
+      load(g);
+      expect(frames()).toHaveLength(1);
+    });
+
+    it('does not trip on a remount, a destroyed frame\'s own about:blank load, or other kinds of frame', () => {
+      const t = make(1, { maxMounted: 1, maxLive: 1 });
+      const a = snippet();
+      t.store.add([a]);
+      t.tick();
+      const first = t.frames()[0];
+      load(first);
+      // Evicted by another card, then back: a new iframe with its own window.
+      const b = embed({ media: { embed: { html: '<i>other</i>' } }, x: 600 });
+      t.store.add([b]);
+      t.layer.setSelection([b.id]);
+      t.tick();
+      expect(t.layer.live.has(a.id)).toBe(false);
+      // The load of the blank page the destroyed frame navigated to, over and over.
+      for (let i = 0; i < NAV_STRIKES * 2; i++) load(first);
+      expect(errors()).toEqual([]);
+      t.layer.setSelection([a.id]);
+      t.tick();
+      expect(t.layer.live.has(a.id)).toBe(true);
+      const again = t.frames().find((f) => f.getAttribute('srcdoc')?.includes('<b>hi</b>')) as HTMLIFrameElement;
+      expect(again).not.toBe(first);
+      load(again);
+      expect(t.layer.live.has(a.id)).toBe(true);
+      // A page may navigate: following a link is not a snippet escaping.
+      t.layer.dispose();
+      document.body.innerHTML = '<div id="host" tabindex="0"><div id="root"></div></div>';
+      host = document.getElementById('host') as HTMLElement;
+      root = document.getElementById('root') as HTMLElement;
+      const p = make();
+      const pageEl = embed({ media: { embed: { url: 'https://example.com/' } } });
+      p.store.add([pageEl]);
+      p.tick();
+      const page = p.frames()[0];
+      const n = restores(page);
+      for (let i = 0; i < NAV_STRIKES * 2; i++) load(page);
+      expect(n()).toBe(0);
+      expect(p.frames()).toHaveLength(1);
+      expect(p.layer.info(pageEl.id)?.blocked).toBeUndefined();
+    });
+
+    it('does not judge the hidden preview frames (studios): they carry the csp attribute and navigate nowhere the layer follows', () => {
+      const rasterize = vi.fn(async () => new Blob(['img'], { type: 'image/webp' }));
+      const t = make(1, { maxLive: 0, maxMounted: 0, previewWorkers: 1 }, 4, { rasterize });
+      t.store.add([embed({ media: { embed: { html: '<i>0</i>' } }, w: 480, h: 300 })]);
+      t.tick();
+      const studio = document.querySelector<HTMLIFrameElement>('body > div[aria-hidden="true"] > iframe');
+      expect(studio).not.toBeNull();
+      expect(studio!.getAttribute('csp')).toBe(SNIPPET_CSP);
+      const n = restores(studio!);
+      for (let i = 0; i < NAV_STRIKES * 2; i++) load(studio!);
+      expect(n()).toBe(0);
+      expect(errors()).toEqual([]);
+    });
+  });
+
+  describe('embed errors and resolve at run time', () => {
+    const errors = () => events.filter(([type]) => type === 'error').map(([, p]) => p as { kind: string; id?: string; url?: string; cause: unknown });
+    const settleMicrotasks = () => vi.advanceTimersByTimeAsync(0);
+
+    it('emits an embed error when resolve throws, and the card falls back to the URL', async () => {
+      vi.useFakeTimers();
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const boom = new Error('boom');
+      const t = make(1, { resolve: () => Promise.reject(boom) });
+      const el = embed({ media: { embed: { url: 'https://example.com/post' } } });
+      t.store.add([el]);
+      await settleMicrotasks();
+      expect(errors()).toEqual([{ kind: 'embed', id: el.id, url: 'https://example.com/post', cause: boom }]);
+      t.tick();
+      expect(t.frames()).toHaveLength(1);
+    });
+
+    it('emits one when resolve times out', async () => {
+      vi.useFakeTimers();
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const t = make(1, { resolve: () => new Promise(() => {}), resolveTimeoutMs: 500 });
+      const el = embed({ media: { embed: { url: 'https://example.com/post' } } });
+      t.store.add([el]);
+      await settleMicrotasks();
+      expect(errors()).toEqual([]);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(errors()).toHaveLength(1);
+      expect(errors()[0]).toMatchObject({ kind: 'embed', id: el.id, url: 'https://example.com/post' });
+      expect((errors()[0].cause as Error).message).toContain('timed out after 500 ms');
+      t.tick();
+      expect(t.frames()).toHaveLength(1);
+    });
+
+    it('reports nothing for a card that was removed meanwhile', async () => {
+      vi.useFakeTimers();
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const t = make(1, { resolve: () => Promise.reject(new Error('late')) });
+      const el = embed({ media: { embed: { url: 'https://example.com/post' } } });
+      t.store.add([el]);
+      t.store.remove([el.id]);
+      await settleMicrotasks();
+      expect(errors()).toEqual([]);
+    });
+
+    it('setOptions takes resolve and resolveTimeoutMs for lookups started afterwards', async () => {
+      vi.useFakeTimers();
+      const t = make();
+      const before = embed({ media: { embed: { url: 'https://example.com/before' } } });
+      t.store.add([before]);
+      await settleMicrotasks();
+      const resolve = vi.fn(() => ({ frameable: false }));
+      t.layer.setOptions({ resolve });
+      // Already resolved: keeps its result.
+      expect(resolve).not.toHaveBeenCalled();
+      expect(t.layer.info(before.id)?.frameable).toBe(true);
+      const after = embed({ media: { embed: { url: 'https://example.com/after' } } });
+      t.store.add([after]);
+      await settleMicrotasks();
+      expect(resolve).toHaveBeenCalledWith('https://example.com/after');
+      expect(t.layer.info(after.id)?.frameable).toBe(false);
+      // The timeout too.
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      t.layer.setOptions({ resolve: () => new Promise(() => {}), resolveTimeoutMs: 50 });
+      const slow = embed({ media: { embed: { url: 'https://example.com/slow' } } });
+      t.store.add([slow]);
+      await settleMicrotasks();
+      expect(errors()).toEqual([]);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(errors()).toHaveLength(1);
     });
   });
 

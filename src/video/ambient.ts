@@ -73,6 +73,10 @@ export interface AmbientDeps {
   now?(): number;
   // The board's frame-rate monitor: while the page runs slow the pool plays fewer clips (see `cap`).
   frameRate?: FrameRateMonitor;
+  // `nonce` of the <style> the videos inject (a CSP with a nonce-based `style-src`).
+  nonce?: string;
+  // A card's file failed to load.
+  onError?: (target: { id: string; src: string }, cause: unknown) => void;
 }
 
 export class AmbientVideos {
@@ -409,6 +413,8 @@ export class AmbientVideos {
     const v = new VideoOverlay(this.world, {
       spinner: false,
       worldSpace: true,
+      nonce: this.deps.nonce,
+      onError: this.deps.onError,
     });
     this.configure(v);
     return v;

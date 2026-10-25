@@ -2,9 +2,9 @@
 // the cards around) plus an optional snap to the background grid. Built once at gesture start from the
 // cards near the viewport, then asked on every pointer move.
 import type { Store } from '../store';
-import type { Element } from '../types';
+import type { Card } from '../types';
 import type { Rect } from '../math';
-import type { Box } from './geometry';
+import type { Aabb } from './geometry';
 import { boxCx, boxCy, elementBox } from './geometry';
 import {
   buildSnapIndex,
@@ -25,10 +25,11 @@ const MAX_CANDIDATES = 400;
 // The viewport grown by this fraction on every side is searched for candidates.
 const VIEW_GROW = 0.25;
 
+/** Snapping while moving and resizing (`CorkboardOptions.snapping`, `board.setSnapping()`). */
 export interface SnapSettings {
-  // Alignment lines, equal gaps and size matches against other cards, drawn as guides.
+  /** Alignment lines, equal gaps and size matches against other cards, drawn as guides. */
   guides: boolean;
-  // Snap to the background dot grid where no guide snapped.
+  /** Snap to the background dot grid where no guide snapped. */
   grid: boolean;
 }
 
@@ -49,7 +50,7 @@ export class SnapSession {
   private index: SnapIndex | null = null;
   private zoom = 1;
   private readonly result: SnapResult = { dx: 0, dy: 0, guides: [] };
-  private readonly hits: Element[] = [];
+  private readonly hits: Card[] = [];
 
   constructor(
     private readonly settings: SnapSettings,
@@ -64,10 +65,10 @@ export class SnapSession {
     if (!this.settings.guides) return;
     const gx = (view.x1 - view.x0) * VIEW_GROW;
     const gy = (view.y1 - view.y0) * VIEW_GROW;
-    const box: Box = { minX: view.x0 - gx, minY: view.y0 - gy, maxX: view.x1 + gx, maxY: view.y1 + gy };
+    const box: Aabb = { minX: view.x0 - gx, minY: view.y0 - gy, maxX: view.x1 + gx, maxY: view.y1 + gy };
     const cx = (view.x0 + view.x1) / 2;
     const cy = (view.y0 + view.y1) / 2;
-    const cands: { id: string; box: Box; d: number }[] = [];
+    const cands: { id: string; box: Aabb; d: number }[] = [];
     for (const el of store.searchInto(box, this.hits)) {
       if (exclude.has(el.id)) continue;
       const b = elementBox(el);
@@ -90,7 +91,7 @@ export class SnapSession {
   }
 
   // The correction to add to a box being moved, and the guides to draw.
-  move(box: Box): { dx: number; dy: number; guides: readonly Guide[] } {
+  move(box: Aabb): { dx: number; dy: number; guides: readonly Guide[] } {
     const threshold = SNAP_THRESHOLD_PX / this.zoom;
     let dx = 0;
     let dy = 0;
@@ -112,7 +113,7 @@ export class SnapSession {
 
   // The correction to add to the dragged edges of a box being resized. A symmetric resize flags both
   // edges of an axis: `edgeX` / `edgeY` then say which one the correction belongs to.
-  resize(box: Box, edges: ResizeEdges): ResizeSnap {
+  resize(box: Aabb, edges: ResizeEdges): ResizeSnap {
     const threshold = SNAP_THRESHOLD_PX / this.zoom;
     let dx = 0;
     let dy = 0;

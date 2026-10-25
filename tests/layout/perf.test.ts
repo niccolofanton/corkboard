@@ -6,7 +6,7 @@ import {
   translatePlacementInPlace,
   type TidyItem,
 } from '../../src/layout';
-import type { Box } from '../../src/interact/geometry';
+import type { Aabb } from '../../src/interact/geometry';
 
 // Budgets (plan / task file): planPlacement 100 items < 2 ms, autoSpot 1,000 boxes + 100-card
 // block < 5 ms. CI-style assertions use 5x; the measured median is printed for the lead.
@@ -55,7 +55,7 @@ describe('layout performance', () => {
     expect(ms).toBeLessThan(0.5);
   });
 
-  const viewport: Box = { minX: 0, minY: 0, maxX: 1280, maxY: 800 };
+  const viewport: Aabb = { minX: 0, minY: 0, maxX: 1280, maxY: 800 };
   // A 100-card block at the default width: 10 columns of 248 + 25 gaps, ~2.7k world px square.
   const plan100 = planPlacement({
     items: Array.from({ length: 100 }, () => ({ aspect: 1.25 })),
@@ -67,7 +67,7 @@ describe('layout performance', () => {
     h: plan100.bounds.maxY - plan100.bounds.minY,
   };
 
-  function scatter(n: number, spread: number, seed: number): Box[] {
+  function scatter(n: number, spread: number, seed: number): Aabb[] {
     const rnd = rng(seed);
     return Array.from({ length: n }, () => {
       const x = (rnd() - 0.5) * spread;
@@ -101,7 +101,7 @@ describe('layout performance', () => {
   });
 
   it('autoSpot at very low zoom (4K viewport at 0.05) stays under budget', () => {
-    const v: Box = { minX: 0, minY: 0, maxX: 76_800, maxY: 43_200 };
+    const v: Aabb = { minX: 0, minY: 0, maxX: 76_800, maxY: 43_200 };
     const occupied = scatter(1000, 120_000, 4);
     // A wall over the centre forces the search outward (and the step to grow past 160 rings).
     occupied.push({ minX: 20_000, minY: 10_000, maxX: 57_000, maxY: 33_000 });

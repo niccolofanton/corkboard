@@ -1,11 +1,13 @@
 // Tidy: reorder cards into a masonry grid in reading order. Pure and in world space; the caller resets
 // any rotation (a move carries no `rot`).
-import { emptyBox, type Box } from '../interact/geometry';
+import { emptyBox, type Aabb } from '../interact/geometry';
+import type { Box } from '../math';
 import { effectiveAspect, masonry, slotWidth, type LayoutItem } from './masonry';
 import { bandOrder } from './order';
 import { placementGap } from './placement';
 import { clamp, median } from './stats';
 
+/** A card as {@link tidy} sees it: id, box and aspect. */
 export interface TidyItem {
   id: string;
   // Items with `fixed` set stay put (they do not take part in the grid).
@@ -13,17 +15,18 @@ export interface TidyItem {
   // A free-aspect item keeps its own size in the grid; the others take the median width and their aspect.
   free?: boolean;
   // World AABB of the painted element (what reading order and the default anchor use).
-  box: Box;
-  // Element size (what the grid places).
+  box: Aabb;
+  // Card size (what the grid places).
   w: number;
   h: number;
 }
 
+/** What {@link tidy} returns: the new rect of every card. */
 export interface TidyResult {
-  // New world top-left and size of every participating item.
-  moves: Map<string, { x: number; y: number; w: number; h: number }>;
+  // New {@link Box} of every participating item, in world px.
+  moves: Map<string, Box>;
   count: number;
-  bounds: Box;
+  bounds: Aabb;
 }
 
 const MAX_COLUMNS = 10;
@@ -38,6 +41,7 @@ function participates(it: TidyItem): boolean {
   );
 }
 
+/** Reorders cards into a masonry grid in reading order, anchored at their current top-left. Pure. */
 export function tidy(
   items: readonly TidyItem[],
   opts: {

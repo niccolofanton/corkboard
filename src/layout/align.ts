@@ -7,14 +7,19 @@
 // (`opts.gap`, see `arrangeGap`): with it the edge is still the one asked for, but whatever would end up
 // on top of another box (or closer than the gap) slides along the OTHER axis until it is clear. Without
 // it they are the plain geometric operations.
-import { boxCx, boxCy, boxH, boxW, type Box } from '../interact/geometry';
+import { boxCx, boxCy, boxH, boxW, type Aabb } from '../interact/geometry';
 import { PLACEMENT_FALLBACK_WIDTH } from './masonry';
 import { bandOrder } from './order';
 import { placementGap } from './placement';
 import { median } from './stats';
 
+/**
+ * Which edge or centre cards line up on: the left / right edge, the vertical centre line (`'centerX'`), the top /
+ * bottom edge, or the horizontal centre line (`'middleY'`). Measured on the cards' world bounding boxes (rotation included).
+ */
 export type AlignMode = 'left' | 'centerX' | 'right' | 'top' | 'middleY' | 'bottom';
 
+/** A move: `dx`, `dy` in world px. */
 export interface Delta {
   dx: number;
   dy: number;
@@ -25,19 +30,22 @@ const EPS = 1e-9;
 // Two boxes are clear of each other when the room between them is the gap, give or take this.
 const CLEAR_EPS = 1e-6;
 
-export interface ArrangeOpts {
+/** Options of the align and distribute functions. */
+export interface ArrangeGapOptions {
   // The room kept between boxes that would otherwise touch or overlap. Absent: no overlap handling.
   gap?: number;
 }
 
-// The gap an arrange keeps between the selected items: the placement gap of their median width (the same
-// `placementGap` the grid and the placement of new cards use).
+/**
+ * The gap an arrange keeps between the selected items: the placement gap of their median width (the same
+ * `placementGap` the grid and the placement of new cards use).
+ */
 export function arrangeGap(widths: readonly number[]): number {
   const w = median(widths.filter((v) => Number.isFinite(v) && v > 0));
   return placementGap(w > 0 ? w : PLACEMENT_FALLBACK_WIDTH);
 }
 
-const shifted = (b: Box, d: Delta | undefined): Box =>
+const shifted = (b: Aabb, d: Delta | undefined): Aabb =>
   d === undefined
     ? b
     : { minX: b.minX + d.dx, minY: b.minY + d.dy, maxX: b.maxX + d.dx, maxY: b.maxY + d.dy };
@@ -50,16 +58,18 @@ const addDelta = (out: Map<string, Delta>, id: string, d: Delta): void => {
   else out.delete(id);
 };
 
-// Slides boxes apart until none is on top of another or closer than `gap`: the minimal moves, the first
-// of every pile staying where it is. Items are settled one after the other; one that collides with the
-// ones already settled goes past them, to the right or down by whichever is shorter (`axis` forces
-// one). Only ever right or down, so a box that has cleared another stays clear of it and the loop ends.
-//
-// Order: the bands of `axis` (a row stays in its left-to-right order, a column in its top-to-bottom
-// one), else reading order (rows, then left to right); `inOrder` takes the items as given (the caller
-// ordered them on their boxes from before a move). Pure; returns the deltas of the boxes that moved.
+/**
+ * Slides boxes apart until none is on top of another or closer than `gap`: the minimal moves, the first
+ * of every pile staying where it is. Items are settled one after the other; one that collides with the
+ * ones already settled goes past them, to the right or down by whichever is shorter (`axis` forces
+ * one). Only ever right or down, so a box that has cleared another stays clear of it and the loop ends.
+ *
+ * Order: the bands of `axis` (a row stays in its left-to-right order, a column in its top-to-bottom
+ * one), else reading order (rows, then left to right); `inOrder` takes the items as given (the caller
+ * ordered them on their boxes from before a move). Pure; returns the deltas of the boxes that moved.
+ */
 export function separate(
-  items: readonly { id: string; box: Box }[],
+  items: readonly { id: string; box: Aabb }[],
   gap: number,
   axis?: 'x' | 'y',
   inOrder = false,
@@ -69,7 +79,7 @@ export function separate(
   if (n < 2) return out;
   const g = Number.isFinite(gap) && gap > 0 ? gap : 0;
   const order = inOrder ? items : bandOrder(items, axis ?? 'y');
-  const placed: Box[] = [];
+  const placed: Aabb[] = [];
   for (const it of order) {
     let box = it.box;
     let dx = 0;
@@ -104,13 +114,15 @@ export function separate(
   return out;
 }
 
-// Move every item so the chosen edge or centre matches the union box of the items. Items that
-// already are aligned are omitted. With `opts.gap` the items that would pile up on the aligned edge
-// slide along the other axis (a row aligned left becomes a column, in the row's order).
+/**
+ * Move every item so the chosen edge or centre matches the union box of the items. Items that
+ * already are aligned are omitted. With `opts.gap` the items that would pile up on the aligned edge
+ * slide along the other axis (a row aligned left becomes a column, in the row's order).
+ */
 export function align(
-  items: readonly { id: string; box: Box }[],
+  items: readonly { id: string; box: Aabb }[],
   mode: AlignMode,
-  opts: ArrangeOpts = {},
+  opts: ArrangeGapOptions = {},
 ): Map<string, Delta> {
   const out = new Map<string, Delta>();
   if (items.length < 2) return out;
@@ -162,23 +174,25 @@ export function align(
   return out;
 }
 
-// Equal GAPS between consecutive boxes (not equal centres): sorted by position along the axis,
-// the two extremes stay and the ones between slide. Needs three or more items. With `opts.gap` the
-// gap is never smaller than that (a span too short for the boxes would overlap them): then the last
-// ones move on past the far extreme.
+/**
+ * Equal GAPS between consecutive boxes (not equal centres): sorted by position along the axis,
+ * the two extremes stay and the ones between slide. Needs three or more items. With `opts.gap` the
+ * gap is never smaller than that (a span too short for the boxes would overlap them): then the last
+ * ones move on past the far extreme.
+ */
 export function distribute(
-  items: readonly { id: string; box: Box }[],
+  items: readonly { id: string; box: Aabb }[],
   axis: 'x' | 'y',
-  opts: ArrangeOpts = {},
+  opts: ArrangeGapOptions = {},
 ): Map<string, Delta> {
   const out = new Map<string, Delta>();
   const n = items.length;
   if (n < 3) return out;
   const horizontal = axis === 'x';
-  const lo = (b: Box): number => (horizontal ? b.minX : b.minY);
-  const hi = (b: Box): number => (horizontal ? b.maxX : b.maxY);
-  const size = (b: Box): number => (horizontal ? boxW(b) : boxH(b));
-  const centre = (b: Box): number => (horizontal ? boxCx(b) : boxCy(b));
+  const lo = (b: Aabb): number => (horizontal ? b.minX : b.minY);
+  const hi = (b: Aabb): number => (horizontal ? b.maxX : b.maxY);
+  const size = (b: Aabb): number => (horizontal ? boxW(b) : boxH(b));
+  const centre = (b: Aabb): number => (horizontal ? boxCx(b) : boxCy(b));
 
   const sorted = items.slice().sort((a, b) => {
     const d = centre(a.box) - centre(b.box) || lo(a.box) - lo(b.box);
@@ -199,8 +213,10 @@ export function distribute(
   return out;
 }
 
-// Equal width: every item takes the median width; aspect-locked items (cards) scale their
-// height along. Items that already have the median width are omitted.
+/**
+ * Equal width: every item takes the median width; aspect-locked items (cards) scale their
+ * height along. Items that already have the median width are omitted.
+ */
 export function equalWidth(
   items: readonly { id: string; w: number; h: number; aspectLocked: boolean }[],
 ): Map<string, { w: number; h: number }> {

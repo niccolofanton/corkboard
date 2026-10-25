@@ -648,7 +648,7 @@ interface StageStore {
   subscribe(l: (e: StoreEvent) => void): () => void;   // emits { type:'change', change: ChangeSet } (added/removed/updated{el,props}/source)
   get(id): Element | undefined;  elements(): IterableIterator<Element>;
   parentOf(id): Element | undefined;  children(frameId): readonly ElementId[];
-  searchInto(box: Box, out: Element[]): Element[];     // rbush window query
+  searchInto(box: Aabb, out: Element[]): Element[];     // rbush window query
   rank(id): number;  readonly orderVersion: number;    // draw order
 }
 

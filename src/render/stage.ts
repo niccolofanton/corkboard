@@ -11,65 +11,113 @@
 //
 // Draw order: every view's `zIndex` is the element's rank in the store's draw order, and the world
 // container sorts by it.
-import { Application, Container, Texture, TilingSprite, Ticker, type WebGLRenderer } from 'pixi.js';
+import {
+  Application,
+  Container,
+  RendererType,
+  Texture,
+  TilingSprite,
+  Ticker,
+  type WebGLRenderer,
+} from 'pixi.js';
+import { CorkboardError, type BoardErrorEvent } from '../errors';
 import type { Camera, Rect } from '../math';
 import { elementBox, emptyBox, worldRectOf, type WorldRect } from '../interact/geometry';
-import type { Box } from '../interact/geometry';
+import type { Aabb } from '../interact/geometry';
+import type { Percentiles, SlowTick, StageStats } from '../stats';
 import type { ChangeSet, StoreEvent } from '../store';
-import { DEFAULTS, MAX_SCALE, MIN_SCALE, type Element, type ElementId } from '../types';
+import { DEFAULTS, MAX_SCALE, MIN_SCALE, type Card, type CardId } from '../types';
 import { CameraController } from './camera';
 import { l2Bucket, l3Bucket, MAX_L3, pickLevel, type Level } from './lod';
 import { OverlayLayer } from './overlay';
 import { parkTicker } from './parkTicker';
-import { FAR_DIST, TextureManager, type WantedItem } from './textures';
-import { DARK_THEME, cssHex, type Theme } from './theme';
+import { FAR_DIST, TextureManager, type TextureError, type WantedItem } from './textures';
+import { DARK_THEME, type Theme } from './theme';
 import type { BoardCard } from './types';
 import { ViewPools, definitionOf } from './views/pool';
 import { MediaView } from './views/mediaView';
-import type { ElementView, ViewCtx } from './views/view';
+import type { CardView, ViewCtx } from './views/view';
 
-// What the stage reads from the store (`Store` satisfies it structurally).
+/** What the stage reads from the store (`Store` satisfies it structurally). */
 export interface StageStore {
   subscribe(listener: (e: StoreEvent) => void): () => void;
-  get(id: ElementId): Element | undefined;
-  elements(): IterableIterator<Element>;
-  searchInto(box: Box, out: Element[]): Element[];
-  rank(id: ElementId): number;
+  get(id: CardId): Card | undefined;
+  elements(): IterableIterator<Card>;
+  searchInto(box: Aabb, out: Card[]): Card[];
+  rank(id: CardId): number;
   readonly orderVersion: number;
 }
 
+/** Options of the stage. `CorkboardOptions.textures` takes the texture ones. */
 export interface StageOptions {
-  // Texture memory budget in bytes (default 256 MB; use ~128 MB on small devices).
+  /**
+   * GPU texture memory budget in bytes. Use ~128 MB on small devices.
+   * @default 268435456 (256 MB)
+   */
   budgetBytes?: number;
-  // Decode workers (default: a quarter of the cores, 1..4).
+  /**
+   * Decode workers.
+   * @default a quarter of the cores, 1..4
+   */
   workers?: number;
-  // URL of the decode worker script, for pages whose CSP forbids `worker-src blob:` (the built-in worker is
-  // inlined and started from a blob URL). Serve `@niccolofanton/corkboard/decode.worker.js` yourself and pass
-  // its URL here.
+  /**
+   * URL of the decode worker script, for pages whose CSP forbids `worker-src blob:` (the built-in worker is
+   * inlined and started from a blob URL). Serve `@niccolofanton/corkboard/decode.worker.js` yourself and pass its URL here.
+   */
   workerUrl?: string | URL;
+  /**
+   * Bake the rounded corners in a software canvas in the workers. Measured about 2x slower to load.
+   * @default false
+   */
   softCanvas?: boolean;
-  // Per-frame texture upload budget, ms (default 4).
+  /**
+   * Per-frame texture upload budget, ms.
+   * @default 4
+   */
   uploadBudgetMs?: number;
-  // Overscan, as a fraction of the viewport added on every side (default 0.5).
+  /**
+   * Overscan, as a fraction of the viewport added on every side.
+   * @default 0.5
+   */
   overscan?: number;
-  // Wrap each render in an EXT_disjoint_timer_query_webgl2 query where the browser has one.
+  /** Wrap each render in an EXT_disjoint_timer_query_webgl2 query where the browser has one. */
   gpuTimer?: boolean;
   theme?: Theme;
-  // Show the background dot grid (default true).
+  /** Show the background dot grid (default true). */
   grid?: boolean;
-  // Completed renders before a retired texture is destroyed (see retire.ts).
+  /** Completed renders before a retired texture is destroyed (see retire.ts). */
   retireDelay?: number;
-  // Load Pixi's CSP-safe build (no `new Function`), for pages whose content security policy forbids eval.
+  /** Load Pixi's CSP-safe build (no `new Function`), for pages whose content security policy forbids eval. */
   cspSafe?: boolean;
-  // The zoom range of the camera (default 0.05..4). A board of thousands of world px wide that is fitted
-  // whole needs a lower minimum.
+  /**
+   * The zoom range of the camera (default 0.05..4). A board of thousands of world px wide that is fitted
+   * whole needs a lower minimum.
+   */
   minScale?: number;
   maxScale?: number;
+  /**
+   * A texture that would not load, a decode worker that died, the WebGL context lost: the board forwards
+   * these to the host as its `error` event.
+   */
+  onError?: (e: BoardErrorEvent) => void;
+  /** The WebGL context was lost / came back (the textures are rebuilt by themselves). */
+  onContextLost?: () => void;
+  onContextRestored?: () => void;
+  /**
+   * Called once per rendered frame (not per idle tick) with the main-thread time of the render and the GPU
+   * timer results that arrived meanwhile (those belong to earlier frames; empty without `gpuTimer`).
+   */
+  onRender?: (e: { cpuMs: number; gpuMs: readonly number[] }) => void;
+  /**
+   * Cancels `Stage.create`: checked after each await, and when it aborts everything made so far is released
+   * and the promise rejects with `signal.reason`.
+   */
+  signal?: AbortSignal;
 }
 
 const LOD_INTERVAL_MS = 100;
 const SETTLE_MS = 140;
-// World px between background dots, also the grid cards snap to when grid snapping is on.
+/** World px between background dots, also the grid cards snap to when grid snapping is on. */
 export const GRID = 24;
 // How far past the viewport (fraction of its size) a card still counts as on screen.
 const VIEW_MARGIN = 0.1;
@@ -83,12 +131,18 @@ const BAKE_CORNER_SLACK = 1;
 // since the bake is baked again.
 const BAKE_ASPECT_SLACK = 0.01;
 
-const pct = (a: Float32Array, n: number, p: number): number => {
-  if (n === 0) return 0;
-  const s = Array.from(a.subarray(0, n)).sort((x, y) => x - y);
-  return s[Math.min(n - 1, Math.floor((n - 1) * p))];
-};
 const r2 = (n: number): number => Math.round(n * 100) / 100;
+
+// The spread of the first `n` samples of a ring buffer; null with none.
+function spread(a: Float32Array, n: number): Percentiles | null {
+  if (n === 0) return null;
+  const s = Array.from(a.subarray(0, n)).sort((x, y) => x - y);
+  const at = (p: number): number => r2(s[Math.min(n - 1, Math.floor((n - 1) * p))]);
+  return { n, p50: at(0.5), p95: at(0.95), max: r2(s[n - 1]) };
+}
+
+// The GPU results of a frame that had none (shared: the render event hands it out read-only).
+const NO_GPU: readonly number[] = Object.freeze([]) as readonly number[];
 
 function sameBytes(a: Uint8Array | undefined, b: Uint8Array | undefined): boolean {
   if (a === b) return true;
@@ -96,10 +150,6 @@ function sameBytes(a: Uint8Array | undefined, b: Uint8Array | undefined): boolea
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
 }
-
-// The results of `contentBounds` that stand for "nothing there" (a fresh rect each, so the public API keeps
-// its shape): a fit of one of them is a no-op instead of a zoom onto the origin.
-const noContent = new WeakSet<Rect>();
 
 // Base64 (standard or url-safe) -> bytes.
 function decodeBase64(s: string): Uint8Array {
@@ -116,9 +166,10 @@ function scaleBounds(o: Pick<StageOptions, 'minScale' | 'maxScale'>): { min: num
   return { min, max };
 }
 
-// A preview / committed geometry in world space, owned by the stage while a gesture runs.
+/** A preview / committed geometry in world space, owned by the stage while a gesture runs. */
 export type PreviewRect = WorldRect;
 
+/** The WebGL stage of a board: Pixi renderer, camera, culling, texture pipeline and card views. The board owns one; reach it with `getInternals`. */
 export class Stage {
   readonly app: Application;
   readonly world: Container;
@@ -132,7 +183,19 @@ export class Stage {
   private readonly opts: Required<
     Omit<
       StageOptions,
-      'theme' | 'workers' | 'workerUrl' | 'retireDelay' | 'cspSafe' | 'grid' | 'minScale' | 'maxScale'
+      | 'theme'
+      | 'workers'
+      | 'workerUrl'
+      | 'retireDelay'
+      | 'cspSafe'
+      | 'grid'
+      | 'minScale'
+      | 'maxScale'
+      | 'onError'
+      | 'onContextLost'
+      | 'onContextRestored'
+      | 'onRender'
+      | 'signal'
     >
   > & { workers: number; retireDelay?: number };
   private readonly ro: ResizeObserver;
@@ -141,6 +204,10 @@ export class Stage {
   // The element the stage sits in: its page position is read when a pointer needs it (the page can
   // move it without resizing it), not only when it resizes.
   private readonly hostEl: HTMLElement;
+  private readonly onError: ((e: BoardErrorEvent) => void) | undefined;
+  private readonly onContextLost: (() => void) | undefined;
+  private readonly onContextRestored: (() => void) | undefined;
+  private readonly onRender: StageOptions['onRender'];
   private theme: Theme;
   private showGrid: boolean;
   private readonly ctx: ViewCtx;
@@ -148,26 +215,26 @@ export class Stage {
   // ── Scene ──
   private store: StageStore | null = null;
   private unsub: (() => void) | null = null;
-  private readonly views = new Map<ElementId, ElementView>();
+  private readonly views = new Map<CardId, CardView>();
   private readonly mediaViews = new Set<MediaView>();
-  private readonly hits: Element[] = [];
+  private readonly hits: Card[] = [];
   // Elements that entered the mount window and wait for their view: mounting is time-budgeted per tick
   // (a zoom-out can bring thousands in at once), nearest first.
-  private mountQueue: { id: ElementId; key: number }[] = [];
-  private readonly queued = new Set<ElementId>();
+  private mountQueue: { id: CardId; key: number }[] = [];
+  private readonly queued = new Set<CardId>();
   private queueSorted = true;
   private stamp = 0;
   private mountedWin: Rect | null = null;
   private mountedScale = 0;
   private orderSeen = -1;
   // Store changes waiting for the next tick.
-  private pendingAdded = new Set<ElementId>();
-  private pendingRemoved = new Map<ElementId, Element>();
-  private pendingUpdated = new Map<ElementId, Set<string>>();
+  private pendingAdded = new Set<CardId>();
+  private pendingRemoved = new Map<CardId, Card>();
+  private pendingUpdated = new Map<CardId, Set<string>>();
   private pendingReload = false;
 
   // ── Cards (texture slots) ──
-  private slotOf = new Map<ElementId, number>();
+  private slotOf = new Map<CardId, number>();
   private freeSlots: number[] = [];
   private slotCount = 0;
   private slotCard: (BoardCard | null)[] = [];
@@ -185,13 +252,13 @@ export class Stage {
   private readonly hashCache = new Map<string, Uint8Array>();
 
   // ── Overrides applied on top of the committed state ──
-  private readonly previews = new Map<ElementId, PreviewRect>();
-  private readonly hidden = new Set<ElementId>();
+  private readonly previews = new Map<CardId, PreviewRect>();
+  private readonly hidden = new Set<CardId>();
   // Runtime pictures that stand in for an element's `media.src` / `sizes` (see setPosterOverride).
-  private readonly posters = new Map<ElementId, string>();
-  private readonly alphas = new Map<ElementId, number>();
+  private readonly posters = new Map<CardId, string>();
+  private readonly alphas = new Map<CardId, number>();
   // Elements that must stay mounted regardless of the window (previewed, being dragged).
-  private readonly pinned = new Set<ElementId>();
+  private readonly pinned = new Set<CardId>();
 
   // ── Loop state ──
   private raf = 0;
@@ -233,7 +300,7 @@ export class Stage {
     unmounts: 0,
   };
   private readonly phase = { store: 0, camera: 0, upload: 0, overlay: 0, render: 0 };
-  private slowTicks: Record<string, number>[] = [];
+  private slowTicks: SlowTick[] = [];
   private reqMs = { search: 0, mount: 0, unmount: 0, lod: 0 };
   private lodPassMs = new Float32Array(1024);
   private nLodPass = 0;
@@ -262,28 +329,59 @@ export class Stage {
     options: StageOptions,
     unpark: () => void,
   ): Promise<Stage> {
-    if (options.cspSafe) await import('pixi.js/unsafe-eval');
+    const { signal } = options;
+    if (options.cspSafe) {
+      await import('pixi.js/unsafe-eval');
+      if (signal?.aborted) throw signal.reason;
+    }
     const app = new Application();
-    const rect = host.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    await app.init({
-      width: Math.max(1, Math.round(rect.width)),
-      height: Math.max(1, Math.round(rect.height)),
-      resolution: dpr,
-      autoDensity: true,
-      antialias: false,
-      backgroundColor: (options.theme ?? DARK_THEME).canvas,
-      preference: 'webgl',
-      powerPreference: 'high-performance',
-      autoStart: false,
-      sharedTicker: false,
-      // Our own LRU owns texture lifetimes; Pixi's idle-time GC would unload atlas pages.
-      gcActive: false,
-      eventFeatures: { move: false, globalMove: false, click: false, wheel: false },
-    });
-    Ticker.system.stop();
-    app.ticker.stop();
-    return new Stage(app, host, options, dpr, unpark);
+    // Whatever was built so far goes: the canvas Pixi appended, the GL context, the ticker hold (by the
+    // caller) and, via the manager, the workers.
+    const abort = (): void => {
+      let canvas: HTMLCanvasElement | null = null;
+      try {
+        canvas = app.canvas as HTMLCanvasElement;
+      } catch {
+        // `init` threw before the renderer existed: no canvas to take back.
+      }
+      try {
+        app.destroy(true, { children: true, texture: false });
+      } catch {
+        // Half-initialised: nothing more to release.
+      }
+      canvas?.remove();
+    };
+    try {
+      const rect = host.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      await app.init({
+        width: Math.max(1, Math.round(rect.width)),
+        height: Math.max(1, Math.round(rect.height)),
+        resolution: dpr,
+        autoDensity: true,
+        antialias: false,
+        backgroundColor: (options.theme ?? DARK_THEME).canvas,
+        preference: 'webgl',
+        powerPreference: 'high-performance',
+        autoStart: false,
+        sharedTicker: false,
+        // Our own LRU owns texture lifetimes; Pixi's idle-time GC would unload atlas pages.
+        gcActive: false,
+        eventFeatures: { move: false, globalMove: false, click: false, wheel: false },
+      });
+      // Aborted while Pixi was starting: the catch below takes the half-made app apart.
+      if (signal?.aborted) throw signal.reason;
+      // Pixi falls back to WebGPU or a 2D canvas when WebGL is missing; the stage needs WebGL2.
+      if (app.renderer.type !== RendererType.WEBGL || !isWebGL2(app.renderer as WebGLRenderer)) {
+        throw new CorkboardError('unsupported', 'Corkboard needs WebGL2, which this browser did not provide');
+      }
+      Ticker.system.stop();
+      app.ticker.stop();
+      return new Stage(app, host, options, dpr, unpark);
+    } catch (err) {
+      abort();
+      throw err;
+    }
   }
 
   private constructor(
@@ -295,6 +393,10 @@ export class Stage {
   ) {
     this.app = app;
     this.hostEl = host;
+    this.onError = options.onError;
+    this.onContextLost = options.onContextLost;
+    this.onContextRestored = options.onContextRestored;
+    this.onRender = options.onRender;
     this.dpr = dpr;
     this.theme = options.theme ?? DARK_THEME;
     this.showGrid = options.grid ?? true;
@@ -344,6 +446,7 @@ export class Stage {
       retireDelay: this.opts.retireDelay,
       onRetire: () => this.rebuildBatches(),
       onWake: () => this.requestFrame(),
+      onError: (e) => this.reportTextureError(e),
     });
     this.tm.keep = (slot, level) =>
       level === 1
@@ -450,8 +553,8 @@ export class Stage {
   private onStoreEvent(e: StoreEvent): void {
     if (e.type !== 'change') return;
     const c: ChangeSet = e.change;
-    if (c.source === 'load') {
-      // A full reload: rebuild from the store at the next tick.
+    if (c.reload) {
+      // `loadSnapshot` swapped the board: rebuild from the store at the next tick instead of walking the diff.
       this.pendingReload = true;
       this.requestFrame();
       return;
@@ -575,17 +678,23 @@ export class Stage {
       const el = store.get(id);
       if (!el || !definitionOf(el.kind).textured) this.freeSlot(id);
     }
+    // Per-card state of cards that are gone (a `load` swaps the whole board; the incremental path does the
+    // same per removal in `flushStore`).
     for (const id of [...this.posters.keys()]) if (!store.get(id)) this.posters.delete(id);
+    for (const id of [...this.previews.keys()]) if (!store.get(id)) this.previews.delete(id);
+    for (const id of [...this.alphas.keys()]) if (!store.get(id)) this.alphas.delete(id);
+    for (const id of [...this.hidden]) if (!store.get(id)) this.hidden.delete(id);
+    for (const id of [...this.pinned]) if (!store.get(id)) this.pinned.delete(id);
     for (const el of store.elements()) if (definitionOf(el.kind).textured) this.allocSlot(el.id);
     const all = ['x', 'y', 'w', 'h', 'rot', 'locked', 'media', 'radius'];
     for (const [id, view] of [...this.views]) {
-      const el = store.get(id) as Element;
+      const el = store.get(id) as Card;
       view.update(el, all, this.rectOf(el), this.ctx);
       if (view instanceof MediaView) this.syncCard(view, el);
     }
     // Slots without a view keep their cards across a reload too: the new store may hold other media.
     for (const [id, slot] of this.slotOf) {
-      if (!this.slotView[slot]) this.syncSlot(id, store.get(id) as Element);
+      if (!this.slotView[slot]) this.syncSlot(id, store.get(id) as Card);
     }
     if (first) {
       this.t0 = performance.now();
@@ -609,7 +718,7 @@ export class Stage {
   }
 
   // ── Cards: slots and media ─────────────────────────────────────────────────
-  private allocSlot(id: ElementId): number {
+  private allocSlot(id: CardId): number {
     let s = this.slotOf.get(id);
     if (s !== undefined) return s;
     s = this.freeSlots.pop() ?? this.slotCount++;
@@ -645,7 +754,7 @@ export class Stage {
     this.slotBakedAspect = bakedAspect;
   }
 
-  private freeSlot(id: ElementId): void {
+  private freeSlot(id: CardId): void {
     const s = this.slotOf.get(id);
     if (s === undefined) return;
     this.slotOf.delete(id);
@@ -670,7 +779,7 @@ export class Stage {
     return b;
   }
 
-  private fillCard(card: BoardCard, el: Element): void {
+  private fillCard(card: BoardCard, el: Card): void {
     const m = el.media;
     card.w = el.w;
     card.h = el.h;
@@ -681,14 +790,14 @@ export class Stage {
 
   // The renditions a card requests: its poster override when it has one, else the element's own. A missing
   // rendition falls back to the picture itself: the decode worker downsamples it.
-  private urlsOf(el: Element): [string | undefined, string | undefined, string | undefined] {
+  private urlsOf(el: Card): [string | undefined, string | undefined, string | undefined] {
     const o = this.posters.get(el.id);
     if (o !== undefined) return [o, o, o];
     const m = el.media;
     return [m.sizes?.small ?? m.src, m.sizes?.medium ?? m.src, m.sizes?.large ?? m.src];
   }
 
-  private newCard(slot: number, el: Element): BoardCard {
+  private newCard(slot: number, el: Card): BoardCard {
     const card: BoardCard = {
       id: slot,
       w: el.w,
@@ -705,7 +814,7 @@ export class Stage {
     return card;
   }
 
-  private mountMedia(view: MediaView, el: Element): void {
+  private mountMedia(view: MediaView, el: Card): void {
     const slot = this.allocSlot(el.id);
     let card = this.slotCard[slot];
     if (!card) {
@@ -724,7 +833,7 @@ export class Stage {
   // and a height / width ratio that moved by more than BAKE_ASPECT_SLACK means the textures were cropped
   // (cover) to another shape.
   // Only committed store changes get here: a live drag / resize preview never touches the card.
-  private refreshCard(card: BoardCard, el: Element): boolean {
+  private refreshCard(card: BoardCard, el: Card): boolean {
     const m = el.media;
     const [l1, l2, l3] = this.urlsOf(el);
     const long = Math.max(el.w, el.h);
@@ -752,7 +861,7 @@ export class Stage {
 
   // The element's size or media changed: keep the BoardCard current, and show the placeholder again when
   // what was resident went stale.
-  private syncCard(view: MediaView, el: Element): void {
+  private syncCard(view: MediaView, el: Card): void {
     const card = view.card;
     if (card && this.refreshCard(card, el)) view.setTexture(null, -1, this.ctx);
   }
@@ -762,7 +871,7 @@ export class Stage {
   // element's own. Dropped when the element is removed. The change swaps the card's pictures without the
   // placeholder in between: what is resident stays on screen until the first level of the new one lands
   // (TextureManager.swapPictures), so a poster that replaces a poster never flashes.
-  setPosterOverride(id: ElementId, url: string | null): void {
+  setPosterOverride(id: CardId, url: string | null): void {
     if ((this.posters.get(id) ?? null) === url) return;
     if (url === null) this.posters.delete(id);
     else this.posters.set(id, url);
@@ -786,14 +895,14 @@ export class Stage {
 
   // The card's sprite shows a rendition of its current picture: not the placeholder, not the ThumbHash and not
   // what a poster override replaced (still on screen while the new one decodes).
-  posterShown(id: ElementId): boolean {
+  posterShown(id: CardId): boolean {
     const v = this.views.get(id);
     return v instanceof MediaView && v.card !== null && v.shown >= 1 && !this.tm.hasOutgoing(v.card);
   }
 
   // The same for a slot that has no view (the element is off screen): its card, and the textures its ThumbHash
   // and thumbnails already got, must not outlive a change of media.
-  private syncSlot(id: ElementId, el: Element): void {
+  private syncSlot(id: CardId, el: Card): void {
     const slot = this.slotOf.get(id);
     const card = slot === undefined ? null : this.slotCard[slot];
     if (card) this.refreshCard(card, el);
@@ -801,21 +910,21 @@ export class Stage {
 
   // ── Views ──────────────────────────────────────────────────────────────────
   // The committed world rect of an element (or its live preview).
-  private rectOf(el: Element): WorldRect {
+  private rectOf(el: Card): WorldRect {
     return this.previews.get(el.id) ?? worldRectOf(el);
   }
 
-  private forceMount(id: ElementId): boolean {
+  private forceMount(id: CardId): boolean {
     return this.pinned.has(id) || this.previews.has(id);
   }
 
-  private inWindow(el: Element, win: Rect): boolean {
+  private inWindow(el: Card, win: Rect): boolean {
     const b = elementBox(el);
     return b.minX <= win.x1 && b.maxX >= win.x0 && b.minY <= win.y1 && b.maxY >= win.y0;
   }
 
   // Puts an element in the mount queue, ordered by its distance from the view centre (cx, cy).
-  private enqueueMount(el: Element, cx: number, cy: number): void {
+  private enqueueMount(el: Card, cx: number, cy: number): void {
     if (this.queued.has(el.id)) return;
     const b = elementBox(el);
     const d = Math.hypot((b.minX + b.maxX) / 2 - cx, (b.minY + b.maxY) / 2 - cy);
@@ -839,7 +948,7 @@ export class Stage {
     const win = this.mountedWin;
     let n = 0;
     while (q.length > 0) {
-      const it = q.pop() as { id: ElementId; key: number };
+      const it = q.pop() as { id: CardId; key: number };
       this.queued.delete(it.id);
       const el = store.get(it.id);
       if (!el || this.views.has(it.id)) continue;
@@ -854,7 +963,7 @@ export class Stage {
     }
   }
 
-  private mount(el: Element): void {
+  private mount(el: Card): void {
     const store = this.store as StageStore;
     const view = this.pools.acquire(el.kind);
     view.mark = this.stamp;
@@ -869,7 +978,7 @@ export class Stage {
     this.counters.mounts++;
   }
 
-  private unmountId(id: ElementId): void {
+  private unmountId(id: CardId): void {
     const view = this.views.get(id);
     if (!view) return;
     this.views.delete(id);
@@ -890,7 +999,7 @@ export class Stage {
     this.counters.unmounts++;
   }
 
-  private applyOverrides(id: ElementId, view: ElementView): void {
+  private applyOverrides(id: CardId, view: CardView): void {
     view.setAlphaOverride(this.alphas.get(id) ?? 1);
     view.display.visible = !this.hidden.has(id);
     const p = this.previews.get(id);
@@ -900,7 +1009,7 @@ export class Stage {
   // ── Overrides (set by the interaction layer) ───────────────────────────────
   // A drag / resize preview: the element is drawn at this rect (world space) without touching the
   // store. Call every pointer move; cheap for a few hundred elements.
-  setPreview(id: ElementId, x: number, y: number, w: number, h: number, rot: number): void {
+  setPreview(id: CardId, x: number, y: number, w: number, h: number, rot: number): void {
     // A fresh rect on every call, never the previous one rewritten: a view keeps the rect it was last given.
     const p: PreviewRect = { x, y, w, h, rot };
     const fresh = !this.previews.has(id);
@@ -915,7 +1024,7 @@ export class Stage {
     this.requestFrame();
   }
 
-  clearPreview(id: ElementId): void {
+  clearPreview(id: CardId): void {
     const p = this.previews.get(id);
     if (!p) return;
     this.previews.delete(id);
@@ -933,7 +1042,7 @@ export class Stage {
     for (const id of [...this.previews.keys()]) this.clearPreview(id);
   }
 
-  previewRectOf(id: ElementId): PreviewRect | undefined {
+  previewRectOf(id: CardId): PreviewRect | undefined {
     return this.previews.get(id);
   }
 
@@ -942,7 +1051,7 @@ export class Stage {
   }
 
   // Hides the canvas copy of an element.
-  setHidden(id: ElementId, hidden: boolean): void {
+  setHidden(id: CardId, hidden: boolean): void {
     if (hidden) this.hidden.add(id);
     else this.hidden.delete(id);
     const v = this.views.get(id);
@@ -951,7 +1060,7 @@ export class Stage {
     this.requestFrame();
   }
 
-  setAlpha(id: ElementId, alpha: number | null): void {
+  setAlpha(id: CardId, alpha: number | null): void {
     if (alpha === null || alpha >= 1) this.alphas.delete(id);
     else this.alphas.set(id, alpha);
     const v = this.views.get(id);
@@ -961,7 +1070,7 @@ export class Stage {
   }
 
   // Keeps an element mounted whatever the window says.
-  pin(id: ElementId, pinned: boolean): void {
+  pin(id: CardId, pinned: boolean): void {
     if (pinned) {
       this.pinned.add(id);
       const el = this.store?.get(id);
@@ -970,11 +1079,11 @@ export class Stage {
   }
 
   // The view of a mounted element (animations, tests); null when not mounted.
-  viewOf(id: ElementId): ElementView | null {
+  viewOf(id: CardId): CardView | null {
     return this.views.get(id) ?? null;
   }
 
-  isMounted(id: ElementId): boolean {
+  isMounted(id: CardId): boolean {
     return this.views.has(id);
   }
 
@@ -999,12 +1108,14 @@ export class Stage {
     return this.dpr;
   }
 
-  contentBounds(ids?: Iterable<ElementId>): Rect {
+  // The rectangle covering the cards (default: all); undefined when there is none (an empty board, ids that
+  // match no card).
+  boundsOf(ids?: Iterable<CardId>): Rect | undefined {
     const store = this.store;
     let b = emptyBox();
     let any = false;
     if (store) {
-      const list: Iterable<Element | undefined> = ids
+      const list: Iterable<Card | undefined> = ids
         ? (function* () {
             for (const id of ids) yield store.get(id);
           })()
@@ -1022,29 +1133,24 @@ export class Stage {
       }
     }
     if (any) return { x0: b.minX, y0: b.minY, x1: b.maxX, y1: b.maxY };
-    // Nothing resolved: a unit rect at the origin (the public shape), remembered as "no content" so a fit
-    // of it does nothing.
-    const none = { x0: 0, y0: 0, x1: 1, y1: 1 };
-    noContent.add(none);
-    return none;
+    return undefined;
   }
 
   fit(animate = true, pad = 48): void {
-    this.cam.requestFit(this.fitTarget(() => this.contentBounds()), pad, animate);
+    this.cam.requestFit(this.fitTarget(() => this.boundsOf()), pad, animate);
   }
 
   // `r` may be a function: it is read when the fit is applied (a fit asked for on a host that has no size
   // yet waits for the first real size).
-  fitRect(r: Rect | (() => Rect), animate = true, pad = 48): void {
+  // An `undefined` rect (nothing to fit: see `boundsOf`) leaves the camera alone.
+  fitRect(r: Rect | undefined | (() => Rect | undefined), animate = true, pad = 48): void {
     this.cam.requestFit(this.fitTarget(r), pad, animate, 440);
   }
 
-  // What a fit reads: the rect, or null for the "no content" rect of `contentBounds` (an empty board, ids
-  // that match no card), which leaves the camera alone.
-  private fitTarget(r: Rect | (() => Rect)): () => Rect | null {
+  // What a fit reads: the rect, or null for none, which leaves the camera alone.
+  private fitTarget(r: Rect | undefined | (() => Rect | undefined)): () => Rect | null {
     return () => {
-      const rect = typeof r === 'function' ? r() : r;
-      return noContent.has(rect) ? null : rect;
+      return (typeof r === 'function' ? r() : r) ?? null;
     };
   }
 
@@ -1054,6 +1160,11 @@ export class Stage {
 
   setCamera(c: Camera): void {
     this.cam.jumpTo(c);
+  }
+
+  // The zoom range of the camera (see `CameraController.setRange`).
+  setScaleRange(min: number, max: number): void {
+    this.cam.setRange(min, max);
   }
 
   zoomBy(k: number): void {
@@ -1131,10 +1242,20 @@ export class Stage {
 
   // Forces Pixi to rebuild the world's batches at the next render (see retire.ts): a batch keeps listing
   // a texture its sprites stopped using, and we are about to destroy it.
+  // `RenderGroup.structureDidChange` is Pixi's own flag for that but not a documented one: where a Pixi minor
+  // has renamed or dropped it, setting it would just add a stray property, so it is only set when it exists.
+  // Otherwise adding and removing a child of the world has the same effect through the public API
+  // (`Container.addChild` / `removeChild` mark the render group's structure as changed).
   private rebuildBatches(): void {
-    const rg = (this.world as unknown as { renderGroup?: { structureDidChange: boolean } })
-      .renderGroup;
-    if (rg) rg.structureDidChange = true;
+    const rg = (this.world as unknown as { renderGroup?: { structureDidChange?: boolean } }).renderGroup;
+    if (rg && 'structureDidChange' in rg) {
+      rg.structureDidChange = true;
+    } else if (!this.world.destroyed) {
+      const probe = new Container();
+      this.world.addChild(probe);
+      this.world.removeChild(probe);
+      probe.destroy();
+    }
     this.dirty = true;
   }
 
@@ -1238,13 +1359,17 @@ export class Stage {
     const ms = performance.now() - t0;
     this.tickMs[this.nTick++ & 4095] = ms;
     if (ms > 25) {
-      // The slowest frames, with where the time went (read through stats().slowTicks).
+      // The slowest frames, with where the time went (read through stats().debug.slowTicks).
       this.slowTicks.push({
         ms: r2(ms),
         scale: r2(this.cam.scale),
         mounted: this.views.size,
         mounts: this.counters.mounts,
-        ...Object.fromEntries(Object.entries(ph).map(([k, v]) => [k, r2(v)])),
+        store: r2(ph.store),
+        camera: r2(ph.camera),
+        upload: r2(ph.upload),
+        overlay: r2(ph.overlay),
+        render: r2(ph.render),
       });
       if (this.slowTicks.length > 40) this.slowTicks.shift();
     }
@@ -1295,10 +1420,29 @@ export class Stage {
     this.gpu?.begin();
     this.app.render();
     this.gpu?.end();
-    this.renderMs[this.nRender++ & 4095] = performance.now() - t;
+    const cpuMs = performance.now() - t;
+    this.renderMs[this.nRender++ & 4095] = cpuMs;
     this.counters.renders++;
+    let gpuMs: readonly number[] = NO_GPU;
     if (this.gpu) {
-      for (const ms of this.gpu.poll()) this.gpuMs[this.nGpu++ & 4095] = ms;
+      gpuMs = this.gpu.poll();
+      for (const ms of gpuMs) this.gpuMs[this.nGpu++ & 4095] = ms;
+    }
+    this.emitRender(cpuMs, gpuMs);
+  }
+
+  // Host code runs here, inside the frame: a throw must not look like a failed render (that rebuilds the
+  // textures), so it is counted and reported once, like a hook.
+  private emitRender(cpuMs: number, gpuMs: readonly number[]): void {
+    const fn = this.onRender;
+    if (!fn) return;
+    try {
+      fn({ cpuMs, gpuMs });
+    } catch (e) {
+      this.counters.hookErrors++;
+      if (this.reportedHooks.has(fn)) return;
+      this.reportedHooks.add(fn);
+      console.error('[corkboard] a render listener threw (reported once):', e);
     }
   }
 
@@ -1491,7 +1635,7 @@ export class Stage {
         if (this.slotView[slot] || tm.has(card, 0)) continue;
         if (!card.thumbhash) continue;
         missing++;
-        const el = store.get(id) as Element;
+        const el = store.get(id) as Card;
         const r = this.rectOf(el);
         const dist = Math.hypot(r.x + r.w / 2 - cx, r.y + r.h / 2 - cy) * scale;
         wanted.push({ card, level: 0, dist: dist + FAR_DIST });
@@ -1537,11 +1681,14 @@ export class Stage {
     const onLost = (e: Event): void => {
       e.preventDefault();
       this.lost = true;
+      this.onContextLost?.();
+      this.onError?.({ kind: 'context', cause: new Error('WebGL context lost') });
     };
     const onRestored = (): void => {
       // Pixi has re-initialised its GL state; every texture of ours is gone.
       this.lost = false;
       this.dropAllTextures();
+      this.onContextRestored?.();
     };
     c.addEventListener('webglcontextlost', onLost);
     c.addEventListener('webglcontextrestored', onRestored);
@@ -1549,6 +1696,21 @@ export class Stage {
       c.removeEventListener('webglcontextlost', onLost);
       c.removeEventListener('webglcontextrestored', onRestored);
     });
+  }
+
+  // The texture manager knows cards by slot; the host knows them by element id.
+  private reportTextureError(e: TextureError): void {
+    if (this.disposed || !this.onError) return;
+    let id: CardId | undefined;
+    if (e.slot !== undefined) {
+      for (const [eid, slot] of this.slotOf) {
+        if (slot === e.slot) {
+          id = eid;
+          break;
+        }
+      }
+    }
+    this.onError({ kind: e.kind, id, url: e.url, cause: e.cause });
   }
 
   // Forgets every texture and reloads what is on screen, in viewport order (context restore, theme
@@ -1618,112 +1780,111 @@ export class Stage {
     s.peakBytes = this.tm.totalBytes;
   }
 
-  // Counters and timings of the render loop: rAF callbacks, ticks, renders, mounted views, texture
-  // memory by level, decode / upload numbers, tick / render / GPU percentiles.
-  stats(): Record<string, unknown> {
-    const levels = [0, 0, 0, 0];
+  // Counters and timings of the render loop and the texture pipeline (see `StageStats`). The board adds
+  // the embeds and the videos to make its `BoardStats`.
+  stats(): StageStats {
+    const levels: [number, number, number, number] = [0, 0, 0, 0];
     for (const v of this.mediaViews) {
       const s = v.card?.id;
       if (s !== undefined && this.slotLevel[s] >= 0) levels[this.slotLevel[s]]++;
     }
-    const nt = Math.min(this.nTick, 4096);
-    const nr = Math.min(this.nRender, 4096);
-    const ng = Math.min(this.nGpu, 4096);
     const s = this.tm.stats;
     const pages = this.tm.pageCount();
+    const c = this.counters;
     return {
       cards: this.slotOf.size,
       mounted: this.views.size,
       mountQueue: this.mountQueue.length,
-      slowTicks: this.slowTicks,
-      requeryMs: Object.fromEntries(Object.entries(this.reqMs).map(([k, v]) => [k, r2(v)])),
-      lodPassMs: {
-        n: Math.min(this.nLodPass, 1024),
-        p50: r2(pct(this.lodPassMs, Math.min(this.nLodPass, 1024), 0.5)),
-        p95: r2(pct(this.lodPassMs, Math.min(this.nLodPass, 1024), 0.95)),
-        max: r2(Math.max(0, ...this.lodPassMs.subarray(0, Math.min(this.nLodPass, 1024)))),
-      },
-      worldChildren: this.world.children.length,
-      pool: this.pools.stats(),
+      lost: this.lost,
       scale: r2(this.cam.scale),
       dpr: this.dpr,
       viewport: [this.cam.width, this.cam.height],
-      levelsMounted: levels,
-      textureBytes: Math.round(this.tm.totalBytes),
-      textureBudget: this.opts.budgetBytes,
-      textureBytesPeak: Math.round(s.peakBytes),
-      overBudgetMsMax: Math.round(s.overBudgetMsMax),
-      l0Pages: pages.l0,
-      l1Pages: pages.l1,
-      l2Textures: this.tm.l2Count(),
-      l3Textures: this.tm.l3Count(),
-      retiredPending: this.tm.retiredPending,
-      bytes: this.tm.breakdown(),
-      queued: this.tm.queued,
-      inflight: this.tm.inflightCount,
-      decodes: s.decodes,
-      decodeMsAvg: s.decodes ? r2(s.decodeMsTotal / s.decodes) : 0,
-      fetchedBytes: s.fetchedBytes,
-      cancelled: s.cancelled,
-      failed: s.failed,
-      evictedL2: s.evictedL2,
-      evictedL3: s.evictedL3,
-      evictedL1: s.evictedL1,
-      uploads: s.uploads,
-      uploadMsMax: r2(s.uploadMsMax),
-      uploadMsAvg: s.uploadFrames ? r2(s.uploadMsTotal / s.uploadFrames) : 0,
-      uploadsLastFrame: s.uploadsLastFrame,
-      ...this.counters,
-      tickMs: {
-        n: nt,
-        p10: r2(pct(this.tickMs, nt, 0.1)),
-        p50: r2(pct(this.tickMs, nt, 0.5)),
-        p95: r2(pct(this.tickMs, nt, 0.95)),
-        p99: r2(pct(this.tickMs, nt, 0.99)),
-        max: r2(nt ? Math.max(...this.tickMs.subarray(0, nt)) : 0),
+      textures: {
+        bytes: Math.round(this.tm.totalBytes),
+        budget: this.opts.budgetBytes,
+        peakBytes: Math.round(s.peakBytes),
+        overBudgetMsMax: Math.round(s.overBudgetMsMax),
+        levelsMounted: levels,
+        pages: { l0: pages.l0, l1: pages.l1 },
+        l2: this.tm.l2Count(),
+        l3: this.tm.l3Count(),
+        retiredPending: this.tm.retiredPending,
+        breakdown: this.tm.breakdown(),
+        queued: this.tm.queued,
+        inflight: this.tm.inflightCount,
+        decodes: s.decodes,
+        decodeMsAvg: s.decodes ? r2(s.decodeMsTotal / s.decodes) : 0,
+        fetchedBytes: s.fetchedBytes,
+        cancelled: s.cancelled,
+        failed: s.failed,
+        evicted: { l1: s.evictedL1, l2: s.evictedL2, l3: s.evictedL3 },
+        uploads: s.uploads,
+        uploadMsMax: r2(s.uploadMsMax),
+        uploadMsAvg: s.uploadFrames ? r2(s.uploadMsTotal / s.uploadFrames) : 0,
+        uploadsLastFrame: s.uploadsLastFrame,
       },
-      renderMs: {
-        n: nr,
-        p10: r2(pct(this.renderMs, nr, 0.1)),
-        p50: r2(pct(this.renderMs, nr, 0.5)),
-        p95: r2(pct(this.renderMs, nr, 0.95)),
-        p99: r2(pct(this.renderMs, nr, 0.99)),
-        max: r2(nr ? Math.max(...this.renderMs.subarray(0, nr)) : 0),
+      render: {
+        frames: c.renders,
+        rafCalls: c.rafCalls,
+        ticks: c.ticks,
+        tickMs: spread(this.tickMs, Math.min(this.nTick, 4096)),
+        cpuMs: spread(this.renderMs, Math.min(this.nRender, 4096)),
+        gpuMs: this.gpu?.supported ? spread(this.gpuMs, Math.min(this.nGpu, 4096)) : null,
+        gpuTimer: this.gpu ? (this.gpu.supported ? 'on' : 'unsupported') : 'off',
+        renderErrors: c.renderErrors,
+        renderErrorsTotal: this.renderErrorsTotal,
+        hookErrors: c.hookErrors,
+        firstPaintMs: this.firstPaintMs === null ? null : Math.round(this.firstPaintMs),
+        l1CompleteMs: this.l1CompleteMs === null ? null : Math.round(this.l1CompleteMs),
       },
-      gpuMs: this.gpu
-        ? this.gpu.supported
-          ? {
-              n: ng,
-              p10: r2(pct(this.gpuMs, ng, 0.1)),
-              p50: r2(pct(this.gpuMs, ng, 0.5)),
-              p95: r2(pct(this.gpuMs, ng, 0.95)),
-              max: r2(ng ? Math.max(...this.gpuMs.subarray(0, ng)) : 0),
-            }
-          : 'unsupported'
-        : 'off',
-      firstPaintMs: this.firstPaintMs === null ? null : Math.round(this.firstPaintMs),
-      l1CompleteMs: this.l1CompleteMs === null ? null : Math.round(this.l1CompleteMs),
-      renderErrorsTotal: this.renderErrorsTotal,
-      lost: this.lost,
-      glRenderer: glRendererString(this.renderer),
-      theme: cssHex(this.theme.canvas),
+      debug: {
+        cullPasses: c.cullPasses,
+        requeries: c.requeries,
+        lodPasses: c.lodPasses,
+        mounts: c.mounts,
+        unmounts: c.unmounts,
+        slowTicks: [...this.slowTicks],
+        requeryMs: {
+          search: r2(this.reqMs.search),
+          mount: r2(this.reqMs.mount),
+          unmount: r2(this.reqMs.unmount),
+          lod: r2(this.reqMs.lod),
+        },
+        lodPassMs: spread(this.lodPassMs, Math.min(this.nLodPass, 1024)),
+        worldChildren: this.world.children.length,
+        viewPool: this.pools.stats(),
+        glRenderer: glRendererString(this.renderer),
+      },
     };
   }
 
   dispose(): void {
     this.disposed = true;
-    if (this.raf) cancelAnimationFrame(this.raf);
-    if (this.settleTimer) clearTimeout(this.settleTimer);
-    this.unsub?.();
-    for (const f of this.cleanups) f();
-    this.ro.disconnect();
-    this.tm.dispose();
-    this.pools.dispose();
+    // Every step runs even if an earlier one threw: the texture manager (workers, GPU memory), the Pixi app
+    // (the WebGL context) and the ticker hold must always be let go.
+    const step = (fn: () => void): void => {
+      try {
+        fn();
+      } catch (err) {
+        console.error('[corkboard] stage dispose step failed', err);
+      }
+    };
+    step(() => {
+      if (this.raf) cancelAnimationFrame(this.raf);
+    });
+    step(() => {
+      if (this.settleTimer) clearTimeout(this.settleTimer);
+    });
+    step(() => this.unsub?.());
+    for (const f of this.cleanups) step(f);
+    step(() => this.ro.disconnect());
+    step(() => this.tm.dispose());
+    step(() => this.pools.dispose());
     const dots = this.bg.texture;
-    this.app.destroy(true, { children: true, texture: false });
+    step(() => this.app.destroy(true, { children: true, texture: false }));
     // `texture: false` leaves the dot texture to us (it is ours alone, never shared).
-    dots.destroy(true);
-    this.unparkTicker();
+    step(() => dots.destroy(true));
+    step(() => this.unparkTicker());
   }
 
   private makeBackground(): TilingSprite {
@@ -1739,6 +1900,11 @@ export class Stage {
     const tex = Texture.from(c, true);
     return new TilingSprite({ texture: tex, width: 1, height: 1 });
   }
+}
+
+// Pixi can hand back a WebGL1 context on old browsers; the texture upload path needs WebGL2.
+function isWebGL2(renderer: WebGLRenderer): boolean {
+  return typeof WebGL2RenderingContext !== 'undefined' && renderer.gl instanceof WebGL2RenderingContext;
 }
 
 function glRendererString(renderer: WebGLRenderer): string {

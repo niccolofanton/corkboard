@@ -20,6 +20,7 @@ const STOP_SPEED = 0.012; // px/ms
 // Exponential zoom smoothing rate (1 - exp(-rate * dt)).
 const ZOOM_EASE = 18;
 
+/** A wheel event reduced to what the camera needs. */
 export interface WheelInput {
   x: number;
   y: number;
@@ -37,6 +38,7 @@ interface FlyTo {
   duration: number;
 }
 
+/** The camera of the stage: the current view, animated moves and the zoom limits. */
 export class CameraController {
   readonly cam: Camera = { tx: 0, ty: 0, scale: 1 };
   // Bumped on every change of the camera, so consumers can skip untouched frames.
@@ -100,6 +102,16 @@ export class CameraController {
 
   get maxScale(): number {
     return this.bounds.max;
+  }
+
+  // Changes the zoom range. A camera (or a move in flight) outside it is brought into it about the viewport
+  // centre. The caller has checked 0 < min <= max.
+  setRange(min: number, max: number): void {
+    this.bounds.min = min;
+    this.bounds.max = max;
+    this.targetScale = clamp(this.targetScale, min, max);
+    if (this.fly) this.fly.to = this.clampCamera(this.fly.to);
+    if (this.cam.scale < min || this.cam.scale > max) this.jumpTo({ ...this.cam });
   }
 
   // True while an animation owns the camera (inertia, an eased zoom, a fly-to, a live drag).

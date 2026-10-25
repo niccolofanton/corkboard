@@ -1,13 +1,15 @@
 // Resize handles of the current selection: which handles exist, where they are in world space, which
 // cursor each one shows, and which handle a pointer position is on. Pure; the overlay draws
 // `SelectionHandles` and the interaction controller feeds pointer positions to `handleAt`.
-import type { Element } from '../types';
-import type { Box, WorldRect } from './geometry';
+import type { Card } from '../types';
+import type { Aabb, WorldRect } from './geometry';
 import { boxOfRect, boxUnion, corners, fromRectLocal, toRectLocal, worldRectOf } from './geometry';
-import type { ElementReader } from './reader';
+import type { CardReader } from './reader';
 
+/** A resize handle of the selection: a corner or an edge. */
 export type HandleId = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
+/** A resize handle: its id, world position (centre) and mouse cursor. */
 export interface Handle {
   id: HandleId;
   // World position of the handle centre.
@@ -67,11 +69,11 @@ export function resizeCursor(id: HandleId, rotDeg: number): string {
 }
 
 // Axis-aligned box of the rotated rects themselves: what resize handles wrap.
-export function geometryBox(rects: readonly WorldRect[]): Box | null {
-  let box: Box | null = null;
+export function geometryBox(rects: readonly WorldRect[]): Aabb | null {
+  let box: Aabb | null = null;
   for (let i = 0; i < rects.length; i++) {
     const r = rects[i];
-    let b: Box;
+    let b: Aabb;
     if (r.rot === 0) {
       b = boxOfRect(r);
     } else {
@@ -96,11 +98,11 @@ function make(rect: WorldRect, id: HandleId, rot: number): Handle {
 
 // The handles of the selection, or null for an empty set or when any element is locked.
 export function selectionHandles(
-  reader: ElementReader,
+  reader: CardReader,
   ids: readonly string[],
   zoom: number,
 ): SelectionHandles | null {
-  const els: Element[] = [];
+  const els: Card[] = [];
   const rects: WorldRect[] = [];
   for (let i = 0; i < ids.length; i++) {
     const el = reader.get(ids[i]);

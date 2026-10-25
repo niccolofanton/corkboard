@@ -9,14 +9,15 @@ vi.mock('pixi.js', async (importOriginal) =>
   (await import('./stageFakes')).withFakeApplication(await importOriginal<typeof import('pixi.js')>()),
 );
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Cache } from 'pixi.js';
+import { Cache, Container, Ticker } from 'pixi.js';
+import { CorkboardError, type BoardErrorEvent } from '../../src/errors';
 import { createElement } from '../../src/model';
 import { Stage } from '../../src/render/stage';
 import type { BoardCard } from '../../src/render/types';
 import type { MediaView } from '../../src/render/views/mediaView';
 import { DARK_THEME, LIGHT_THEME } from '../../src/render/theme';
 import { Store } from '../../src/store';
-import type { Element, MediaSource } from '../../src/types';
+import type { Card, CardMediaInput } from '../../src/types';
 import { fake, FakeWorker, installDom, type Dom } from './stageFakes';
 
 let dom: Dom;
@@ -41,10 +42,10 @@ function dispose(stage: Stage): void {
   stage.dispose();
 }
 
-const el = (id: string, x = 0, y = 0, w = 200, h = 100, media?: MediaSource): Element =>
+const el = (id: string, x = 0, y = 0, w = 200, h = 100, media?: CardMediaInput): Card =>
   createElement({ x, y, w, h, media: media ?? { src: `${id}.jpg`, thumbhash: HASH } }, id);
 
-async function boot(els: Element[] = []) {
+async function boot(els: Card[] = []) {
   const store = new Store();
   store.add(els);
   const stage = await Stage.create(dom.host, { workers: 1 });
@@ -64,6 +65,7 @@ interface Inner {
   overlay: { setDpr: (d: number) => void };
   lost: boolean;
   counters: { renderErrors: number; hookErrors: number };
+  previews: Map<string, unknown>;
 }
 const inner = (s: Stage) => s as unknown as Inner;
 
@@ -88,7 +90,7 @@ function land(maxLevel = 1): void {
   }
 }
 
-const media = (src: string, thumbhash: string | undefined = HASH): MediaSource => ({ src, thumbhash });
+const media = (src: string, thumbhash: string | undefined = HASH): CardMediaInput => ({ src, thumbhash });
 // The card (the texture manager's view of an element) a slot holds, by element id.
 const cardOf = (s: Stage, id: string): BoardCard =>
   inner(s).slotCard[inner(s).slotOf.get(id) as number] as BoardCard;
@@ -103,7 +105,7 @@ describe('Stage store events', () => {
   });
 
   describe('an id removed and added again before the tick', () => {
-    const check = async (swap: (store: Store, next: Element) => void) => {
+    const check = async (swap: (store: Store, next: Card) => void) => {
       const { stage, store } = await boot([el('a', 0, 0, 200, 100)]);
       dom.drain();
       swap(store, el('a', 300, 400, 100, 100, media('new.jpg')));
@@ -173,8 +175,7 @@ describe('Stage store events', () => {
     it('also when the store is reloaded with other media under the same id', async () => {
       const { stage, store } = await farAway();
       const card = cardOf(stage, 'far');
-      store.clear();
-      store.add([el('far', 100000, 0, 200, 100, media('reloaded.jpg'))], 'load');
+      store.replaceAll([el('far', 100000, 0, 200, 100, media('reloaded.jpg'))]);
       dom.drain();
       expect(card.l1Url).toBe('reloaded.jpg');
       expect(stage.tm.has(card, 0)).toBe(false);
@@ -209,7 +210,7 @@ describe('Stage store events', () => {
 
 describe('Stage poster overrides', () => {
   // A booted card whose L0 and L1 of the element's own picture are resident and on screen.
-  const resident = async (els: Element[] = [el('a')]) => {
+  const resident = async (els: Card[] = [el('a')]) => {
     const { stage, store } = await boot(els);
     dom.drain();
     land();
@@ -334,8 +335,7 @@ describe('Stage poster overrides', () => {
     store.remove(['a']);
     dom.drain();
     expect(posters().has('a')).toBe(false);
-    store.clear();
-    store.add([el('d', 0, 0)], 'load');
+    store.replaceAll([el('d', 0, 0)]);
     dom.drain();
     expect(posters().size).toBe(0);
   });
@@ -441,11 +441,12 @@ describe('Stage baked corner radius', () => {
 describe('Stage mounting before the first cull pass', () => {
   it('culls a big add made before any tick: only the cards near the view ever get a view', async () => {
     const { stage, store } = await boot();
-    const many: Element[] = [];
+    const many: Card[] = [];
     for (let i = 0; i < 3000; i++) many.push(el(`c${i}`, (i % 55) * 1000, Math.floor(i / 55) * 1000));
     store.add(many);
     dom.drain();
-    const stats = stage.stats() as { mounted: number; mounts: number; mountQueue: number };
+    const st = stage.stats();
+    const stats = { mounted: st.mounted, mounts: st.debug.mounts, mountQueue: st.mountQueue };
     expect(stage.isMounted('c0')).toBe(true);
     expect(stats.mounted).toBeGreaterThan(0);
     // The 800 x 600 view plus half a screen of overscan holds a couple of cards of this 1000 px grid. The
@@ -464,12 +465,14 @@ describe('Stage fit', () => {
     stage.cam.jumpTo({ tx: 5, ty: 6, scale: 2 });
     stage.fit(false);
     stage.fit(true);
-    stage.fitRect(() => stage.contentBounds([]), false);
-    stage.fitRect(stage.contentBounds(['nope']), true);
     expect(stage.cam.cam).toEqual({ tx: 5, ty: 6, scale: 2 });
     expect(stage.cam.busy).toBe(false);
-    // The public bounds keep their shape.
-    expect(stage.contentBounds()).toEqual({ x0: 0, y0: 0, x1: 1, y1: 1 });
+    // `boundsOf` says "nothing" with undefined, and a fit of that leaves the camera alone.
+    expect(stage.boundsOf()).toBeUndefined();
+    expect(stage.boundsOf(['nope'])).toBeUndefined();
+    stage.fitRect(stage.boundsOf(), false);
+    stage.fitRect(() => stage.boundsOf(['nope']), true);
+    expect(stage.cam.cam).toEqual({ tx: 5, ty: 6, scale: 2 });
     // With a card it still fits.
     store.add([el('a', 1000, 1000, 400, 200)]);
     dom.drain();
@@ -538,7 +541,7 @@ describe('Stage loop', () => {
       expect(good.mock.calls.length).toBe(bad.mock.calls.length);
       expect(fake.app!.renders - rendersBefore).toBeGreaterThanOrEqual(4);
       expect(reset).not.toHaveBeenCalled();
-      expect(stage.stats().renderErrorsTotal).toBe(0);
+      expect(stage.stats().render.renderErrorsTotal).toBe(0);
       expect(inner(stage).counters.renderErrors).toBe(0);
       expect(inner(stage).counters.hookErrors).toBe(bad.mock.calls.length);
       expect(err).toHaveBeenCalledTimes(1);
@@ -656,5 +659,362 @@ describe('Stage dot texture', () => {
     expect(tex.destroyed).toBe(false);
     dispose(stage);
     expect(tex.destroyed).toBe(true);
+  });
+});
+
+describe('Stage.dispose', () => {
+  it('runs every step even when earlier ones throw: texture manager, Pixi app, ticker', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const before = Ticker.system.autoStart;
+    const { stage } = await boot();
+    const s = stage as unknown as { cleanups: (() => void)[]; ro: { disconnect(): void }; pools: { dispose(): void } };
+    s.cleanups.push(() => {
+      throw new Error('cleanup');
+    });
+    s.ro.disconnect = () => {
+      throw new Error('observer');
+    };
+    s.pools.dispose = () => {
+      throw new Error('pools');
+    };
+    const tm = vi.spyOn(stage.tm, 'dispose');
+    expect(() => dispose(stage)).not.toThrow();
+    expect(tm).toHaveBeenCalledTimes(1);
+    expect(fake.app!.destroyed).toBe(true);
+    expect(Ticker.system.autoStart).toBe(before);
+    expect(err).toHaveBeenCalledTimes(3);
+  });
+
+  it('still releases the Pixi app when the texture manager throws', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { stage } = await boot();
+    vi.spyOn(stage.tm, 'dispose').mockImplementation(() => {
+      throw new Error('workers');
+    });
+    dispose(stage);
+    expect(fake.app!.destroyed).toBe(true);
+    expect(err).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Stage.create failure', () => {
+  const canvases = () => dom.host.querySelectorAll('canvas').length;
+
+  it('rejects with the signal\'s reason when it aborts while Pixi starts, and gives everything back', async () => {
+    const before = Ticker.system.autoStart;
+    const reason = new Error('strict mode');
+    const ctl = new AbortController();
+    let open!: () => void;
+    fake.initGate = new Promise<void>((r) => (open = r));
+    const p = Stage.create(dom.host, { workers: 1, signal: ctl.signal });
+    await Promise.resolve();
+    expect(canvases()).toBe(0);
+    ctl.abort(reason);
+    open();
+    await expect(p).rejects.toBe(reason);
+    expect(fake.app!.destroyed).toBe(true);
+    expect(canvases()).toBe(0);
+    expect(Ticker.system.autoStart).toBe(before);
+  });
+
+  it('rejects at once for a signal that is already aborted at the end of init, even if init succeeds', async () => {
+    const ctl = new AbortController();
+    fake.initGate = Promise.resolve().then(() => ctl.abort('late'));
+    await expect(Stage.create(dom.host, { workers: 1, signal: ctl.signal })).rejects.toBe('late');
+    expect(fake.app!.destroyed).toBe(true);
+  });
+
+  it('ignores a signal that does not abort', async () => {
+    const stage = await Stage.create(dom.host, { workers: 1, signal: new AbortController().signal });
+    stages.push(stage);
+    expect(canvases()).toBe(1);
+  });
+
+  it('gives everything back when init rejects: the canvas, the app, the ticker', async () => {
+    const before = Ticker.system.autoStart;
+    fake.initError = new Error('no GL');
+    await expect(Stage.create(dom.host, { workers: 1 })).rejects.toThrow('no GL');
+    expect(fake.app!.destroyed).toBe(true);
+    expect(canvases()).toBe(0);
+    expect(Ticker.system.autoStart).toBe(before);
+  });
+
+  it('terminates the workers it started and removes the canvas when the stage cannot be built', async () => {
+    const before = Ticker.system.autoStart;
+    let made = 0;
+    const terminated: unknown[] = [];
+    class Flaky extends FakeWorker {
+      constructor() {
+        super();
+        if (++made === 2) throw new SyntaxError('bad workerUrl');
+      }
+      terminate(): void {
+        terminated.push(this);
+      }
+    }
+    vi.stubGlobal('Worker', Flaky);
+    await expect(Stage.create(dom.host, { workers: 3, workerUrl: 'http://[bad' })).rejects.toThrow('bad workerUrl');
+    expect(terminated).toHaveLength(1);
+    expect(fake.app!.destroyed).toBe(true);
+    expect(canvases()).toBe(0);
+    expect(Ticker.system.autoStart).toBe(before);
+  });
+
+  it('throws CorkboardError("unsupported") and cleans up when Pixi did not pick WebGL', async () => {
+    fake.rendererType = 2; // WebGPU
+    const err = await Stage.create(dom.host, { workers: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(CorkboardError);
+    expect(err.code).toBe('unsupported');
+    expect(fake.app!.destroyed).toBe(true);
+    expect(canvases()).toBe(0);
+  });
+
+  it('throws "unsupported" for a context that is not WebGL2', async () => {
+    fake.webgl2 = false;
+    const err = await Stage.create(dom.host, { workers: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(CorkboardError);
+    expect(err.code).toBe('unsupported');
+    expect(canvases()).toBe(0);
+  });
+});
+
+describe('Stage runtime errors', () => {
+  it('reports a context loss and its restore', async () => {
+    const events: string[] = [];
+    const errors: BoardErrorEvent[] = [];
+    const stage = await Stage.create(dom.host, {
+      workers: 1,
+      onContextLost: () => events.push('lost'),
+      onContextRestored: () => events.push('restored'),
+      onError: (e) => errors.push(e),
+    });
+    stages.push(stage);
+    stage.attach(new Store());
+    stage.canvasEl.dispatchEvent(new Event('webglcontextlost'));
+    stage.canvasEl.dispatchEvent(new Event('webglcontextrestored'));
+    expect(events).toEqual(['lost', 'restored']);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].kind).toBe('context');
+  });
+
+  it('names the element of a picture that failed to load, with its URL', async () => {
+    const errors: BoardErrorEvent[] = [];
+    const store = new Store();
+    store.add([el('a')]);
+    const stage = await Stage.create(dom.host, { workers: 1, onError: (e) => errors.push(e) });
+    stages.push(stage);
+    stage.attach(store);
+    dom.drain();
+    const w = FakeWorker.all[0];
+    const m = w.loads.find((l) => l.level === 1)!;
+    w.reply({ op: 'fail', rid: m.rid, reason: 'HTTP 404', aborted: false });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ kind: 'texture', id: 'a', url: 'a.jpg' });
+  });
+
+  it('reports a dead decode worker once, without an element', async () => {
+    const errors: BoardErrorEvent[] = [];
+    const store = new Store();
+    store.add([el('a'), el('b')]);
+    const stage = await Stage.create(dom.host, { workers: 1, onError: (e) => errors.push(e) });
+    stages.push(stage);
+    stage.attach(store);
+    dom.drain();
+    FakeWorker.all[0].onerror?.({ message: 'boom' });
+    expect(errors.map((e) => [e.kind, e.id])).toEqual([['worker', undefined]]);
+    // The board still runs: nothing is queued for a pool with no worker.
+    dom.drain();
+    expect(stage.tm.queued).toBe(0);
+  });
+});
+
+describe('Stage render event and typed stats', () => {
+  const bootWith = async (options: Parameters<typeof Stage.create>[1], els: Card[] = [el('a'), el('b', 300)]) => {
+    const store = new Store();
+    store.add(els);
+    const stage = await Stage.create(dom.host, { workers: 1, ...options });
+    stages.push(stage);
+    stage.attach(store);
+    return { stage, store };
+  };
+
+  it('calls onRender once per rendered frame, with the render time and no GPU results, and not while idle', async () => {
+    const seen: { cpuMs: number; gpuMs: readonly number[] }[] = [];
+    const { stage } = await bootWith({ onRender: (e) => seen.push(e) });
+    dom.drain();
+    expect(fake.app!.renders).toBeGreaterThan(0);
+    expect(seen).toHaveLength(fake.app!.renders);
+    expect(stage.stats().render.frames).toBe(seen.length);
+    for (const e of seen) {
+      expect(e.cpuMs).toBeGreaterThanOrEqual(0);
+      expect(e.gpuMs).toEqual([]);
+    }
+    // Parked: no frame, no event.
+    const n = seen.length;
+    expect(dom.frames).toHaveLength(0);
+    dom.runFrame();
+    expect(seen).toHaveLength(n);
+    // A change renders again.
+    stage.markDirty();
+    dom.drain();
+    expect(seen.length).toBeGreaterThan(n);
+  });
+
+  it('a throwing onRender is a counted hook error: the frame is not retried as a render failure', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const bad = vi.fn(() => {
+      throw new Error('listener');
+    });
+    const { stage } = await bootWith({ onRender: bad });
+    dom.drain();
+    stage.markDirty();
+    dom.drain();
+    const s = stage.stats().render;
+    expect(bad.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(s.hookErrors).toBe(bad.mock.calls.length);
+    expect(s.renderErrors).toBe(0);
+    expect(s.renderErrorsTotal).toBe(0);
+    expect(err).toHaveBeenCalledTimes(1);
+  });
+
+  it('stats() is grouped and typed: null series before the first frame, percentiles after', async () => {
+    const { stage } = await bootWith({});
+    const before = stage.stats();
+    expect(before.render).toMatchObject({ frames: 0, cpuMs: null, gpuMs: null, gpuTimer: 'off', firstPaintMs: null });
+    dom.drain();
+    const s = stage.stats();
+    expect(Object.keys(s).sort()).toEqual(['cards', 'debug', 'dpr', 'lost', 'mountQueue', 'mounted', 'render', 'scale', 'textures', 'viewport']);
+    expect(s.cards).toBe(2);
+    expect(s.lost).toBe(false);
+    expect(s.viewport).toEqual([800, 600]);
+    const cpu = s.render.cpuMs!;
+    expect(Object.keys(cpu).sort()).toEqual(['max', 'n', 'p50', 'p95']);
+    expect(cpu.n).toBe(s.render.frames);
+    expect(cpu.p50).toBeLessThanOrEqual(cpu.p95);
+    expect(cpu.p95).toBeLessThanOrEqual(cpu.max);
+    expect(s.render.tickMs!.n).toBeGreaterThan(0);
+    expect(s.render.rafCalls).toBeGreaterThan(0);
+    expect(Object.keys(s.textures).sort()).toEqual(
+      ['breakdown', 'budget', 'bytes', 'cancelled', 'decodeMsAvg', 'decodes', 'evicted', 'failed', 'fetchedBytes', 'inflight', 'l2', 'l3', 'levelsMounted', 'overBudgetMsMax', 'pages', 'peakBytes', 'queued', 'retiredPending', 'uploadMsAvg', 'uploadMsMax', 'uploads', 'uploadsLastFrame'],
+    );
+    expect(s.textures.levelsMounted).toHaveLength(4);
+    expect(Object.keys(s.textures.breakdown).sort()).toEqual(['l2Bytes', 'l3Bytes', 'pageBytes', 'pinned', 'pinnedBytes']);
+    expect(Object.keys(s.textures.evicted).sort()).toEqual(['l1', 'l2', 'l3']);
+    expect(s.debug.slowTicks).toBeInstanceOf(Array);
+    expect(Object.keys(s.debug.viewPool).sort()).toEqual(['created', 'pooled', 'reused']);
+    // JSON-safe, apart from the documented Infinity-free numbers here.
+    expect(() => JSON.stringify(s)).not.toThrow();
+  });
+
+  it('reports a GPU timer the browser does not have as "unsupported" with no gpuMs', async () => {
+    const { stage } = await bootWith({ gpuTimer: true });
+    dom.drain();
+    expect(stage.stats().render).toMatchObject({ gpuTimer: 'unsupported', gpuMs: null });
+  });
+});
+
+describe('Stage load (a whole-board swap)', () => {
+  it('reconciles views, slots and per-card state with the new contents in one tick', async () => {
+    const { stage, store } = await boot([el('a'), el('b', 300)]);
+    dom.drain();
+    stage.setPreview('b', 1, 2, 3, 4, 0);
+    stage.pin('b', true);
+    expect(inner(stage).previews.has('b')).toBe(true);
+    store.replaceAll([el('c', 600), el('a', 50)]);
+    dom.drain();
+    expect(stage.isMounted('b')).toBe(false);
+    expect(stage.isMounted('c')).toBe(true);
+    expect(stage.isMounted('a')).toBe(true);
+    expect(stage.viewOf('a')!.el!.x).toBe(50);
+    expect(stage.stats().cards).toBe(2);
+    expect(inner(stage).previews.size).toBe(0);
+  });
+
+  it('is keyed on the store\'s reload flag, not on the source: a plain \'load\' write walks the diff', async () => {
+    const { stage, store } = await boot([el('a'), el('b', 300)]);
+    dom.drain();
+    store.batch(() => {
+      store.clear('load');
+      store.add([el('c', 600), el('a', 50)], 'load');
+    });
+    dom.drain();
+    expect(stage.isMounted('b')).toBe(false);
+    expect(stage.isMounted('c')).toBe(true);
+    expect(stage.viewOf('a')!.el!.x).toBe(50);
+    expect(stage.stats().cards).toBe(2);
+  });
+
+  it('a remove and an add of the same id in one batch arrives as an update: the view follows in place', async () => {
+    const { stage, store } = await boot([el('a'), el('b', 300)]);
+    dom.drain();
+    const view = stage.viewOf('a');
+    store.batch(() => {
+      store.remove(['a']);
+      store.add([el('a', 80)]);
+    });
+    dom.drain();
+    expect(stage.viewOf('a')).toBe(view);
+    expect(stage.viewOf('a')!.el!.x).toBe(80);
+    // It was re-added on top: the draw order follows.
+    expect(stage.viewOf('a')!.display.zIndex).toBeGreaterThan(stage.viewOf('b')!.display.zIndex);
+  });
+});
+
+describe('Stage rebuildBatches (the Pixi render group flag)', () => {
+  type World = { renderGroup?: unknown; addChild: (c: unknown) => unknown; removeChild: (c: unknown) => unknown };
+  const worldOf = (s: Stage) => (s as unknown as { world: World }).world;
+  const rebuild = (s: Stage) => (s as unknown as { rebuildBatches: () => void }).rebuildBatches();
+
+  it('sets structureDidChange on the real render group, without touching the scene', async () => {
+    const { stage } = await boot();
+    const world = worldOf(stage);
+    const rg = world.renderGroup as { structureDidChange: boolean };
+    expect(rg).toBeTruthy();
+    rg.structureDidChange = false;
+    const add = vi.spyOn(world, 'addChild');
+    rebuild(stage);
+    expect(rg.structureDidChange).toBe(true);
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it('where Pixi has no such flag, adds and removes a child instead of leaving a stray property', async () => {
+    const { stage } = await boot();
+    const world = worldOf(stage);
+    const real = world.renderGroup;
+    const renamed: Record<string, unknown> = { structureChanged: false };
+    Object.defineProperty(world, 'renderGroup', { value: renamed, configurable: true });
+    const add = vi.spyOn(world, 'addChild').mockImplementation((c) => c);
+    const remove = vi.spyOn(world, 'removeChild').mockImplementation((c) => c);
+    rebuild(stage);
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledWith(add.mock.calls[0][0]);
+    expect('structureDidChange' in renamed).toBe(false);
+    Object.defineProperty(world, 'renderGroup', { value: real, configurable: true });
+  });
+
+  it('does the same when the world has no render group property at all', async () => {
+    const { stage } = await boot();
+    const world = worldOf(stage);
+    const real = world.renderGroup;
+    Object.defineProperty(world, 'renderGroup', { value: undefined, configurable: true });
+    const add = vi.spyOn(world, 'addChild').mockImplementation((c) => c);
+    vi.spyOn(world, 'removeChild').mockImplementation((c) => c);
+    rebuild(stage);
+    expect(add).toHaveBeenCalledTimes(1);
+    Object.defineProperty(world, 'renderGroup', { value: real, configurable: true });
+  });
+
+  it('the fallback works on the pinned Pixi: adding and removing a child marks the render group', async () => {
+    const { stage } = await boot();
+    const world = worldOf(stage);
+    const rg = world.renderGroup as { structureDidChange: boolean };
+    const probe = new Container();
+    rg.structureDidChange = false;
+    world.addChild(probe);
+    expect(rg.structureDidChange).toBe(true);
+    rg.structureDidChange = false;
+    world.removeChild(probe);
+    expect(rg.structureDidChange).toBe(true);
+    probe.destroy();
   });
 });

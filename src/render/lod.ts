@@ -1,13 +1,4 @@
-// Level-of-detail choice for a media card.
-//
-//   L0  ThumbHash, decoded to <= 32 px (a shared 32 px atlas): first paint and tiny cards
-//   L1  ~160 px rendition packed into 128 px atlas cells: cards under ~128 device px
-//   L2  ~480 px rendition, an own texture at bucket 256 / 512: up to ~480 device px
-//   L3  ~1600 px rendition, an own texture at bucket 1024 / 1600: close zoom, at most MAX_L3 cards at a time
-//
-// The level follows the card's long side in DEVICE pixels. A hysteresis band keeps a view parked
-// on a boundary from flapping (and re-fetching): a card goes up past `T * UP` and down below
-// `T * DOWN`; inside the band it keeps its previous level. Originals never reach the canvas.
+/** Texture level of a card: 0 placeholder, 1 atlas cell, 2 own texture, 3 close zoom. */
 export type Level = 0 | 1 | 2 | 3;
 
 export const LOD_L0_MAX_DEVICE_PX = 24;

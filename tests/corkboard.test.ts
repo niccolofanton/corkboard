@@ -1,14 +1,15 @@
 // The public `Corkboard` pieces that need no WebGL: `add` (sizes and placement of new cards) and the
-// camera's `fit`, run against a real Store and LayoutApi with a stub stage.
+// camera's `fit`, run against a real Store and BoardLayout with a stub stage.
 import { describe, expect, it, vi } from 'vitest';
 // Corkboard.ts only needs the Stage type and `Stage.create`; loading Pixi in jsdom is noise.
 vi.mock('../src/render/stage', () => ({ GRID: 24 }));
-import { CameraApi, Corkboard } from '../src/Corkboard';
-import { LayoutApi } from '../src/LayoutApi';
+import { BoardCamera } from '../src/BoardCamera';
+import { Corkboard } from '../src/Corkboard';
+import { BoardLayout } from '../src/BoardLayout';
 import { createElement } from '../src/model';
 import type { Stage } from '../src/render/stage';
 import { Store } from '../src/store';
-import { DEFAULTS, type ElementInit } from '../src/types';
+import { DEFAULTS, type CardInit } from '../src/types';
 
 function stubStage() {
   return {
@@ -20,18 +21,18 @@ function stubStage() {
       visibleRect: () => ({ x0: 0, y0: 0, x1: 1280, y1: 800 }),
     },
     fitRect: vi.fn(),
-    contentBounds: () => ({ x0: 0, y0: 0, x1: 1, y1: 1 }),
+    boundsOf: () => undefined,
   };
 }
 
-const card = (id: string): ElementInit & { id: string } => ({ id, x: 0, y: 0, w: 100, h: 100, media: { src: `${id}.jpg` } });
+const card = (id: string): CardInit & { id: string } => ({ id, x: 0, y: 0, w: 100, h: 100, media: { src: `${id}.jpg` } });
 
 describe('camera.fit', () => {
   function make(ids: string[] = []) {
     const store = new Store();
     store.add(ids.map((id) => createElement(card(id), id)));
     const stage = stubStage();
-    return { stage, camera: new CameraApi(stage as unknown as Stage, store) };
+    return { stage, camera: new BoardCamera(stage as unknown as Stage, store) };
   }
 
   it('does nothing on an empty board', () => {
@@ -60,9 +61,9 @@ describe('Corkboard.add', () => {
   // `add` only reads the store and the layout api: run it on those.
   function make() {
     const store = new Store();
-    const layout = new LayoutApi(store, stubStage() as unknown as Stage);
-    const add = (input: ElementInit | ElementInit[]) =>
-      Corkboard.prototype.add.call({ store, layout } as unknown as Corkboard, input).map((id) => store.get(id)!);
+    const layout = new BoardLayout(store, stubStage() as unknown as Stage);
+    const add = (input: CardInit | CardInit[]) =>
+      Corkboard.prototype.add.call({ store, layoutCtl: layout, alive: () => {} } as unknown as Corkboard, input).map((id) => store.get(id)!);
     return { store, add };
   }
 

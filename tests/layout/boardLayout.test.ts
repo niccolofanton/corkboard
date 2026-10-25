@@ -1,14 +1,14 @@
-// LayoutApi against a real Store and a stub stage that keeps the previews and pins it is asked for and
+// BoardLayout against a real Store and a stub stage that keeps the previews and pins it is asked for and
 // lets a test run the animation frame by frame: what the store holds while a layout animates, how an
 // arrange ends or is replaced, equal width, and where new cards are put.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { boxCx, elementBox, type Box } from '../../src/interact/geometry';
+import { boxCx, elementBox, type Aabb } from '../../src/interact/geometry';
 import { arrangeGap } from '../../src/layout';
-import { LayoutApi } from '../../src/LayoutApi';
+import { BoardLayout } from '../../src/BoardLayout';
 import { createElement } from '../../src/model';
 import type { Stage } from '../../src/render/stage';
 import { Store } from '../../src/store';
-import type { Element, ElementInit } from '../../src/types';
+import type { Card, CardInit } from '../../src/types';
 
 type Rect = { x: number; y: number; w: number; h: number };
 
@@ -59,14 +59,14 @@ function fakeStage(cam: Partial<{ w: number; h: number; empty: boolean }> & { re
 }
 
 let n = 0;
-const card = (init: Partial<ElementInit> = {}): Element =>
+const card = (init: Partial<CardInit> = {}): Card =>
   createElement({ x: 0, y: 0, w: 100, h: 100, media: { src: 'x.jpg' }, ...init }, `c${n++}`);
 
-function board(cards: Element[], stageOpts: Parameters<typeof fakeStage>[0] = {}) {
+function board(cards: Card[], stageOpts: Parameters<typeof fakeStage>[0] = {}) {
   const store = new Store();
   store.add(cards);
   const s = fakeStage(stageOpts);
-  const layout = new LayoutApi(store, s.stage);
+  const layout = new BoardLayout(store, s.stage);
   const changes: { updated: number; ids: string[] }[] = [];
   store.subscribe((e) => {
     changes.push({ updated: e.change.updated.length, ids: e.change.updated.map((u) => u.el.id) });
@@ -107,13 +107,13 @@ describe('layout animation', () => {
   it('what is asked right after is the new arrangement: get, hit area, bounds', () => {
     const b = board(scattered());
     const ids = [...b.store.ids()];
-    const twin = board(ids.map((id) => ({ ...(b.store.get(id) as Element) })));
+    const twin = board(ids.map((id) => ({ ...(b.store.get(id) as Card) })));
     twin.layout.tidy(undefined, { animate: false });
     b.layout.tidy();
     expect(b.rects()).toEqual(twin.rects());
     // The spatial index too: a card is found where it is now, not where it was.
     for (const id of ids) {
-      const el = b.store.get(id) as Element;
+      const el = b.store.get(id) as Card;
       expect(b.store.searchInto(elementBox(el), []).map((e) => e.id)).toContain(id);
     }
     const old = elementBox(scattered()[2]);
@@ -222,8 +222,8 @@ describe('equalWidth', () => {
     card({ x: 220, y: 0, w: 300, h: 300 }),
     card({ x: 540, y: 0, w: 400, h: 400 }),
   ];
-  const boxes = (b: ReturnType<typeof board>): Box[] => [...b.store.elements()].map((e) => elementBox(e));
-  const overlap = (a: Box, c: Box, gap: number): boolean =>
+  const boxes = (b: ReturnType<typeof board>): Aabb[] => [...b.store.elements()].map((e) => elementBox(e));
+  const overlap = (a: Aabb, c: Aabb, gap: number): boolean =>
     a.minX < c.maxX + gap - 1e-6 &&
     c.minX < a.maxX + gap - 1e-6 &&
     a.minY < c.maxY + gap - 1e-6 &&
@@ -266,26 +266,26 @@ describe('equalWidth', () => {
     cards[2] = { ...cards[2], locked: true };
     const b = board(cards);
     b.layout.equalWidth(undefined, { animate: false });
-    expect((b.store.get(cards[2].id) as Element).w).toBe(400);
+    expect((b.store.get(cards[2].id) as Card).w).toBe(400);
   });
 });
 
 describe('placing new cards', () => {
-  const placed = (b: ReturnType<typeof board>, init: Partial<ElementInit>): Element => {
+  const placed = (b: ReturnType<typeof board>, init: Partial<CardInit>): Card => {
     const el = card({ ...init, w: init.w ?? 100, h: init.h ?? 100 });
     b.layout.placeNew([el], new Set([el.id]));
     b.store.add([el]);
     return el;
   };
   // True when no other card shares any area with `el`.
-  const clear = (b: ReturnType<typeof board>, el: Element): boolean => {
+  const clear = (b: ReturnType<typeof board>, el: Card): boolean => {
     const inner = { minX: el.x + 0.5, minY: el.y + 0.5, maxX: el.x + el.w - 0.5, maxY: el.y + el.h - 0.5 };
     return b.store.searchInto(inner, []).every((o) => o.id === el.id);
   };
 
   it('does not land on a card beyond half a screen from the view, on a dense board', () => {
     // A 100 px lattice of cards over 5000 x 5000 px with one 200 x 200 hole out at x = 2050.
-    const cards: Element[] = [];
+    const cards: Card[] = [];
     for (let x = -2200; x < 3000; x += 100) {
       for (let y = -2200; y < 2800; y += 100) {
         if (x >= 2000 && x < 2200 && y >= 200 && y < 400) continue;

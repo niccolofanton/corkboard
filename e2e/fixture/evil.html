@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>evil</title>
+<!-- A page a hostile snippet sends its frame to. Served with no Allow-CSP-From header: Chromium must not run it in a
+     frame that carries the snippet's csp attribute. If it runs, it tells its parent and asks the server for /evil-ran. -->
+<script>
+  parent.postMessage('evil-ran', '*');
+  new Image().src = '/evil-ran';
+</script>
+<p>evil</p>

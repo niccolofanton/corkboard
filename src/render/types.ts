@@ -1,5 +1,4 @@
-// What the TextureManager needs to know about one media card. The stage derives it from an element
-// (see stage.ts `fillCard`); the manager never sees elements or the store.
+/** A card as the stage tracks it. */
 export interface BoardCard {
   // Dense slot, assigned by the stage and recycled when the element is removed.
   id: number;

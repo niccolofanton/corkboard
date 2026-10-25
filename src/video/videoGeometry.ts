@@ -10,6 +10,7 @@
 import type { Camera } from '../math';
 import { DEG } from '../interact/geometry';
 
+/** A card's box in world px: the top-left of the unrotated box, its size and its rotation in degrees. */
 export interface VideoRect {
   // World px: the card's box (x / y is the top-left of the UNROTATED box) and its rotation in degrees.
   x: number;

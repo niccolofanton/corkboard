@@ -4,18 +4,23 @@ import type { Theme } from '../render/theme';
 import { cssHex } from '../render/theme';
 import type { ResolvedEmbed } from './resolve';
 
+/** The icon on a generated tile. */
 export type TileGlyph = 'play' | 'music' | 'code' | 'design' | 'globe' | 'link-off';
 
+/** What a generated tile (the poster of an embed card with no picture) looks like. */
 export interface TileSpec {
-  glyph: TileGlyph;
+  // null: none (an HTML snippet: its tile is plain grey text until its preview lands).
+  glyph: TileGlyph | null;
   // Top line (provider or host), small caps.
   label: string;
   // The main text; may be empty.
   title: string;
-  // 0..359, from the host: the same site always gets the same colour.
-  hue: number;
+  // 0..359, from the host: the same site always gets the same colour. null: grey (an HTML snippet has no
+  // site to colour it by, and a made-up hue reads as content it does not have).
+  hue: number | null;
 }
 
+/** A stable hue, in degrees, for a host name. */
 export function hostHue(host: string): number {
   let h = 2166136261;
   for (let i = 0; i < host.length; i++) {
@@ -34,13 +39,14 @@ const GLYPH: Record<ResolvedEmbed['provider'], TileGlyph> = {
   generic: 'globe',
 };
 
+/** The look of the generated tile for a resolved embed. Pure. */
 export function tileSpec(r: ResolvedEmbed): TileSpec {
-  let glyph: TileGlyph = r.kind === 'html' ? 'code' : GLYPH[r.provider];
+  let glyph: TileGlyph | null = r.kind === 'html' ? null : GLYPH[r.provider];
   if (r.kind === 'url' && r.iframeSrc === null) glyph = 'link-off';
   else if (r.kind === 'url' && !r.frameable && r.provider === 'generic') glyph = 'link-off';
   const title =
     r.title ?? (r.kind === 'html' ? 'HTML snippet' : r.provider === 'generic' ? pathOf(r.url) : '');
-  return { glyph, label: r.label, title, hue: hostHue(r.host) };
+  return { glyph, label: r.label, title, hue: r.kind === 'html' ? null : hostHue(r.host) };
 }
 
 function pathOf(url: string): string {
@@ -152,10 +158,10 @@ function drawGlyph(ctx: Ctx, g: TileGlyph, cx: number, cy: number, s: number, co
 
 const FONT = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 
-// Paints the tile on `ctx` (size w x h). The theme decides light or dark; the hue is the site's.
+/** Paints the tile on `ctx` (size w x h). The theme decides light or dark; the hue is the site's. */
 export function paintTile(ctx: Ctx, w: number, h: number, spec: TileSpec, theme: Theme): void {
   const dark = theme.dark;
-  const hsl = (s: number, l: number): string => `hsl(${spec.hue} ${s}% ${l}%)`;
+  const hsl = (s: number, l: number): string => `hsl(${spec.hue ?? 0} ${spec.hue === null ? 0 : s}% ${l}%)`;
   const g = ctx.createLinearGradient(0, 0, w, h);
   g.addColorStop(0, dark ? hsl(34, 20) : hsl(40, 90));
   g.addColorStop(1, dark ? hsl(30, 12) : hsl(34, 82));
@@ -166,7 +172,7 @@ export function paintTile(ctx: Ctx, w: number, h: number, spec: TileSpec, theme:
 
   // One centred group: glyph, label, title. Sizes follow the tile's width, so text reads at card size.
   const pad = Math.round(w * 0.06);
-  const glyph = Math.round(Math.min(w * 0.2, h * 0.34));
+  const glyph = spec.glyph === null ? 0 : Math.round(Math.min(w * 0.2, h * 0.34));
   const labelPx = Math.round(w * 0.04);
   const titlePx = Math.round(w * 0.055);
   ctx.textBaseline = 'alphabetic';
@@ -177,7 +183,7 @@ export function paintTile(ctx: Ctx, w: number, h: number, spec: TileSpec, theme:
   const groupH =
     glyph + gap + labelPx + (lines.length > 0 ? Math.round(titlePx * 0.5) + lines.length * titlePx * 1.2 : 0);
   let y = Math.max(pad * 0.5, (h - groupH) / 2);
-  drawGlyph(ctx, spec.glyph, w / 2, y + glyph / 2, glyph, cssHex(theme.accent));
+  if (spec.glyph !== null) drawGlyph(ctx, spec.glyph, w / 2, y + glyph / 2, glyph, cssHex(theme.accent));
   y += glyph + gap + labelPx;
   ctx.fillStyle = dim;
   ctx.font = `700 ${labelPx}px ${FONT}`;
@@ -193,7 +199,7 @@ export function paintTile(ctx: Ctx, w: number, h: number, spec: TileSpec, theme:
   }
 }
 
-// A PNG blob of the tile, or null where there is no canvas (SSR, jsdom).
+/** A PNG blob of the tile, or null where there is no canvas (SSR, jsdom). */
 export async function drawTile(spec: TileSpec, aspect: number, theme: Theme): Promise<Blob | null> {
   const { w, h } = tileSize(aspect);
   if (typeof OffscreenCanvas !== 'undefined') {

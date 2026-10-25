@@ -26,4 +26,37 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      # Also: the published bundle carries no test hooks (scripts/check-dist.mjs).
       - run: pnpm check:package
+
+  e2e:
+    # Real WebGL (software GL in headless Chromium and Firefox) on the built library, with the fast upload path and
+    # the public fallback. Both Pixi versions, since the fast path uses Pixi internals. WebKit is left out: its
+    # headless WebGL2 on Linux CI is not reliable enough to gate on.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pixi: [pinned, latest]
+        browser: [chromium, firefox]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - if: matrix.pixi == 'latest'
+        run: pnpm add -D pixi.js@^8
+      - run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
+      # Builds the library first (`build:e2e`), then runs the one project of this job.
+      - run: pnpm test:e2e --project=${{ matrix.browser }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.browser }}-${{ matrix.pixi }}
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: ignore

@@ -1,18 +1,44 @@
 // Pure camera math. No DOM, no Pixi.
 
-// World -> screen camera: a world point (wx, wy) shows at (tx + wx*scale, ty + wy*scale).
+/** The view: a world point (wx, wy) shows at (`tx` + wx * `scale`, `ty` + wy * `scale`) in host-local CSS px. */
 export interface Camera {
+  /** Screen x of the world origin, CSS px. */
   tx: number;
+  /** Screen y of the world origin, CSS px. */
   ty: number;
+  /** Zoom: CSS px per world px. */
   scale: number;
 }
 
-// A world rectangle by its corners.
+/**
+ * A world rectangle by its corners: (`x0`, `y0`) top-left, (`x1`, `y1`) bottom-right. What `camera.visible()`,
+ * `bounds()`, `inRect()` and `camera.zoomTo()` use. See {@link Box} for the `{ x, y, w, h }` shape.
+ */
 export interface Rect {
+  /** Left edge. */
   x0: number;
+  /** Top edge. */
   y0: number;
+  /** Right edge. */
   x1: number;
+  /** Bottom edge. */
   y1: number;
+}
+
+/**
+ * An x/y/w/h rectangle: top-left corner and size. Each use says whether it is world px or screen px:
+ * `board.screenRect(id)` returns one in host-local CSS px (where the card is drawn), the `rects` of the `transform`
+ * event are in world px. Not to be confused with {@link Rect}, the world rectangle by corners.
+ */
+export interface Box {
+  /** Left edge. */
+  x: number;
+  /** Top edge. */
+  y: number;
+  /** Width. */
+  w: number;
+  /** Height. */
+  h: number;
 }
 
 export const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));

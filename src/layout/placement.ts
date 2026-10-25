@@ -1,6 +1,6 @@
 // Placement: where a block of new cards lands. Computed once and re-run only when its inputs change;
 // while a pointer moves the caller can just translate the cached result. Everything is in world space.
-import type { Box } from '../interact/geometry';
+import type { Aabb } from '../interact/geometry';
 import {
   PLACEMENT_FALLBACK_ASPECT,
   PLACEMENT_FALLBACK_WIDTH,
@@ -19,8 +19,10 @@ const MAX_GAP = 48;
 const MIN_COLUMNS = 2;
 const MAX_COLUMNS = 10;
 
-// W: the median width of the cards already on the canvas, so new cards blend in (>= 3 cards),
-// else the default card width.
+/**
+ * W: the median width of the cards already on the canvas, so new cards blend in (>= 3 cards),
+ * else the default card width.
+ */
 export function placementWidth(existingCardWidths: readonly number[]): number {
   const widths: number[] = [];
   for (let i = 0; i < existingCardWidths.length; i++) {
@@ -30,19 +32,22 @@ export function placementWidth(existingCardWidths: readonly number[]): number {
   return widths.length >= MIN_CARDS_FOR_MEDIAN ? median(widths) : PLACEMENT_FALLBACK_WIDTH;
 }
 
-// G: a tenth of the width, kept between 12 and 48 so tiny cards still breathe and huge ones
-// don't float apart.
+/**
+ * G: a tenth of the width, kept between 12 and 48 so tiny cards still breathe and huge ones
+ * don't float apart.
+ */
 export function placementGap(width: number): number {
   return clamp(Math.round(width / 10), MIN_GAP, MAX_GAP);
 }
 
-// c: roughly square block. One item is one column; Shift (singleRow) lays everything out in a row.
+/** c: roughly square block. One item is one column; Shift (singleRow) lays everything out in a row. */
 export function placementColumns(n: number, meanAspect: number, singleRow = false): number {
   if (n <= 1) return 1;
   if (singleRow) return n;
   return clamp(Math.round(Math.sqrt(n * effectiveAspect(meanAspect))), MIN_COLUMNS, MAX_COLUMNS);
 }
 
+/** Input of {@link planPlacement}: the new cards and the room around them. */
 export interface PlacementInput {
   items: readonly LayoutItem[];
   existingCardWidths: readonly number[];
@@ -54,19 +59,22 @@ export interface PlacementInput {
     | { kind: 'center'; x: number; y: number };
 }
 
+/** What {@link planPlacement} returns: where the new cards go. */
 export interface PlacementResult {
   // World rectangles in input order.
   rects: LayoutRect[];
   // Bounds of the block (what snapping and the outline use).
-  bounds: Box;
+  bounds: Aabb;
   // The item width W (not the block width: that is boxW(bounds)).
   width: number;
   gap: number;
   columns: number;
 }
 
-// Pure and cheap (100 items: well under a millisecond): the caller caches the result per carry
-// and only moves it with translatePlacement[InPlace].
+/**
+ * Pure and cheap (100 items: well under a millisecond): the caller caches the result per carry
+ * and only moves it with translatePlacement[InPlace].
+ */
 export function planPlacement(input: PlacementInput): PlacementResult {
   const { items, anchor } = input;
   const n = items.length;
@@ -95,7 +103,7 @@ export function planPlacement(input: PlacementInput): PlacementResult {
   };
 }
 
-// Shifted copy; the input is untouched.
+/** Shifted copy; the input is untouched. */
 export function translatePlacement(
   result: PlacementResult,
   dx: number,
@@ -114,7 +122,7 @@ export function translatePlacement(
   };
 }
 
-// Per-pointer-move path: no allocation, mutates the cached result and returns it.
+/** Per-pointer-move path: no allocation, mutates the cached result and returns it. */
 export function translatePlacementInPlace(
   result: PlacementResult,
   dx: number,

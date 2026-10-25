@@ -67,7 +67,7 @@ const overlayVideo = (): HTMLVideoElement => {
 const fadeOut = (): void => void vi.advanceTimersByTime(FADE_OUT_MS + 40);
 
 describe('VideoLayer pause', () => {
-  it('stays paused when the options change: setVideo does not un-pause the overlay', () => {
+  it('stays paused when the options change: `video.setOptions` does not un-pause the overlay', () => {
     const { layer } = make({ mode: 'hover' });
     layer.setSelection(['v1']);
     expect(layer.playing.has('v1')).toBe(true);
@@ -177,5 +177,35 @@ describe('VideoLayer visibility', () => {
     show();
     expect(pause).not.toHaveBeenCalled();
     expect(play).not.toHaveBeenCalled();
+  });
+});
+
+describe('VideoLayer errors', () => {
+  it('reports a <video> that failed to load once per card and file, with the card and the URL', () => {
+    const onError = vi.fn();
+    const store = new Store();
+    store.add([card()]);
+    layer = new VideoLayer({ root, store, stage: fakeStage(), onError }, { mode: 'hover' });
+    layer.setSelection(['v1']);
+    const v = overlayVideo();
+    v.dispatchEvent(new Event('error'));
+    v.dispatchEvent(new Event('error'));
+    expect(onError).toHaveBeenCalledTimes(1);
+    const e = onError.mock.calls[0][0];
+    expect(e).toMatchObject({ kind: 'video', id: 'v1', url: '/media/v1.mp4' });
+    expect(e.cause).toBeDefined();
+  });
+
+  it('ignores an error that comes after the card let go of its file', () => {
+    const onError = vi.fn();
+    const store = new Store();
+    store.add([card()]);
+    layer = new VideoLayer({ root, store, stage: fakeStage(), onError }, { mode: 'hover' });
+    layer.setSelection(['v1']);
+    const v = overlayVideo();
+    layer.setSelection([]);
+    fadeOut();
+    v.dispatchEvent(new Event('error'));
+    expect(onError).not.toHaveBeenCalled();
   });
 });

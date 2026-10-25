@@ -1,8 +1,8 @@
-// Marquee (rubber-band) selection and selection bounds. Pure: reads elements through `ElementReader`.
+// Marquee (rubber-band) selection and selection bounds. Pure: reads elements through `CardReader`.
 //
 // `touch` selects every element whose rotated rect meets the box; `contain` only those wholly inside it.
-import type { Element } from '../types';
-import type { Box, WorldRect } from './geometry';
+import type { Card } from '../types';
+import type { Aabb, WorldRect } from './geometry';
 import {
   boxIntersectsRotatedRect,
   boxUnion,
@@ -10,21 +10,22 @@ import {
   rotatedRectInsideBox,
   worldRectOf,
 } from './geometry';
-import type { ElementReader } from './reader';
+import type { CardReader } from './reader';
 
+/** Options of {@link elementsInBox}. */
 export interface MarqueeOptions {
   // Default true: locked elements are not selectable by a marquee (a click still selects them).
   skipLocked?: boolean;
-  filter?: (el: Element) => boolean;
+  filter?: (el: Card) => boolean;
 }
 
-const hits: Element[] = [];
-const scratch: Element[] = [];
+const hits: Card[] = [];
+const scratch: Card[] = [];
 
-// Ids of the elements selected by dragging `box`, ordered by draw order (bottom first).
+/** Ids of the elements selected by dragging `box`, ordered by draw order (bottom first). */
 export function elementsInBox(
-  reader: ElementReader,
-  box: Box,
+  reader: CardReader,
+  box: Aabb,
   mode: 'touch' | 'contain',
   opts: MarqueeOptions = {},
 ): string[] {
@@ -48,14 +49,16 @@ export function elementsInBox(
   return ids;
 }
 
-// Union AABB of the elements, plus the rotated world rect when exactly one element is selected (so the
-// selection outline follows its rotation). Locked elements count; missing ids are ignored; null when
-// nothing resolves.
+/**
+ * Union AABB of the elements, plus the rotated world rect when exactly one element is selected (so the
+ * selection outline follows its rotation). Locked elements count; missing ids are ignored; null when
+ * nothing resolves.
+ */
 export function selectionBounds(
-  reader: ElementReader,
+  reader: CardReader,
   ids: readonly string[],
-): { box: Box; rect: WorldRect | null } | null {
-  let box: Box | null = null;
+): { box: Aabb; rect: WorldRect | null } | null {
+  let box: Aabb | null = null;
   let count = 0;
   let single: WorldRect | null = null;
   for (let i = 0; i < ids.length; i++) {

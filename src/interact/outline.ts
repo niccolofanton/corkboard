@@ -5,10 +5,10 @@
 // `outlinePoints` grows it by a screen-px offset the way a CSS outline-offset does: the outer radius is
 // `r + offset`.
 import type { Camera } from '../math';
-import type { Element } from '../types';
+import type { Card } from '../types';
 import { DEG, type WorldRect } from './geometry';
 
-// A world rect plus the corner radius to draw it with.
+/** The rectangle of a selection or hover outline. */
 export interface OutlineRect extends WorldRect {
   // World px; 0 / absent = square corners.
   radius?: number;
@@ -17,7 +17,7 @@ export interface OutlineRect extends WorldRect {
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 
 // The outline of `el` at `rect` (its world rect, or the live preview of it while it is dragged).
-export function outlineOf(el: Pick<Element, 'radius'>, rect: WorldRect): OutlineRect {
+export function outlineOf(el: Pick<Card, 'radius'>, rect: WorldRect): OutlineRect {
   return { ...rect, radius: clamp(el.radius, 0, Math.min(rect.w, rect.h) / 2) };
 }
 

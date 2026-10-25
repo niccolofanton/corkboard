@@ -4,16 +4,16 @@
 // poster is the picture); the playing <video> is a DOM overlay (src/video/*), not part of this view.
 import { Container, Sprite, Texture } from 'pixi.js';
 import { DEG, type WorldRect } from '../../interact/geometry';
-import type { Element } from '../../types';
+import type { Card } from '../../types';
 import type { BoardCard } from '../types';
 import { parseHex } from '../theme';
-import type { ElementView, ViewCtx } from './view';
+import type { CardView, ViewCtx } from './view';
 
-export class MediaView implements ElementView {
+export class MediaView implements CardView {
   readonly variant = 'media' as const;
   readonly display = new Container();
   private readonly sprite: Sprite;
-  el: Element | null = null;
+  el: Card | null = null;
   mark = 0;
   // The texture-manager side of this card (slot id, size, urls); owned by the stage.
   card: BoardCard | null = null;
@@ -32,11 +32,11 @@ export class MediaView implements ElementView {
     this.display.addChild(this.sprite);
   }
 
-  get kind(): Element['kind'] {
+  get kind(): Card['kind'] {
     return this.el?.kind ?? 'image';
   }
 
-  mount(el: Element, rect: WorldRect, ctx: ViewCtx): void {
+  mount(el: Card, rect: WorldRect, ctx: ViewCtx): void {
     this.el = el;
     this.display.alpha = 1;
     this.rect = rect;
@@ -44,7 +44,7 @@ export class MediaView implements ElementView {
     this.paintPlaceholder(ctx);
   }
 
-  update(el: Element, _props: readonly string[], rect: WorldRect, ctx: ViewCtx): void {
+  update(el: Card, _props: readonly string[], rect: WorldRect, ctx: ViewCtx): void {
     this.el = el;
     this.rect = rect;
     this.place();

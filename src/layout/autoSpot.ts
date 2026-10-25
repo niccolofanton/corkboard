@@ -1,6 +1,6 @@
 // Auto spot: where an inserted block goes when nobody places it by hand. Search outward from the
 // viewport centre for the nearest free position.
-import { boxCx, boxCy, boxH, boxW, type Box } from '../interact/geometry';
+import { boxCx, boxCy, boxH, boxW, type Aabb } from '../interact/geometry';
 
 const DEFAULT_STEP = 48;
 const DEFAULT_MAX_RADIUS_FACTOR = 2;
@@ -17,7 +17,7 @@ const EPS = 1e-9;
 // and how many rings out the search goes. NaN or infinite inputs give a non-finite `maxRadius`.
 function searchPlan(
   block: { w: number; h: number },
-  viewport: Box,
+  viewport: Aabb,
   opts: { step?: number; maxRadiusFactor?: number },
 ): { ox: number; oy: number; step: number; maxRings: number; maxRadius: number } {
   const step0 = opts.step !== undefined && opts.step > 0 ? opts.step : DEFAULT_STEP;
@@ -36,28 +36,32 @@ function searchPlan(
   return { ox, oy, step, maxRings, maxRadius };
 }
 
-// The world area `autoSpot` can put the block in: only boxes meeting it can block a candidate. Query the
-// store for this, not for the viewport: the search reaches 2 viewport diagonals out, and the block's own
-// size past that.
+/**
+ * The world area `autoSpot` can put the block in: only boxes meeting it can block a candidate. Query the
+ * store for this, not for the viewport: the search reaches 2 viewport diagonals out, and the block's own
+ * size past that.
+ */
 export function autoSpotArea(
   block: { w: number; h: number },
-  viewport: Box,
+  viewport: Aabb,
   opts: { step?: number; maxRadiusFactor?: number } = {},
-): Box {
+): Aabb {
   const { ox, oy, step, maxRings } = searchPlan(block, viewport, opts);
   const reach = step * maxRings;
   return { minX: ox - reach, minY: oy - reach, maxX: ox + block.w + reach, maxY: oy + block.h + reach };
 }
 
-// How the search works: the block's top-left at lattice point p overlaps the box B exactly when
-// p lies strictly inside B grown by the block's size on its min sides, i.e. in the open range
-// (B.min - blockSize, B.max). So instead of testing every candidate against every box, each
-// box paints a rectangle of lattice cells into a 2D difference array; one prefix-sum pass then
-// tells whether any candidate is blocked. Cost: O(boxes + cells), independent of block size.
+/**
+ * How the search works: the block's top-left at lattice point p overlaps the box B exactly when
+ * p lies strictly inside B grown by the block's size on its min sides, i.e. in the open range
+ * (B.min - blockSize, B.max). So instead of testing every candidate against every box, each
+ * box paints a rectangle of lattice cells into a 2D difference array; one prefix-sum pass then
+ * tells whether any candidate is blocked. Cost: O(boxes + cells), independent of block size.
+ */
 export function autoSpot(
   block: { w: number; h: number },
-  viewport: Box,
-  occupied: readonly Box[],
+  viewport: Aabb,
+  occupied: readonly Aabb[],
   opts: { step?: number; maxRadiusFactor?: number } = {},
 ): { x: number; y: number } {
   const { ox, oy, step, maxRings, maxRadius } = searchPlan(block, viewport, opts);
@@ -87,7 +91,7 @@ function searchRings(
   ox: number,
   oy: number,
   step: number,
-  occupied: readonly Box[],
+  occupied: readonly Aabb[],
   rings: number,
   from: number,
 ): { i: number; j: number } | null {
@@ -152,9 +156,11 @@ function searchRings(
   return null;
 }
 
-// True when more than half of the block lies outside the viewport: the camera then flies there.
-// Exactly half visible does not count.
-export function shouldPanTo(block: Box, viewport: Box): boolean {
+/**
+ * True when more than half of the block lies outside the viewport: the camera then flies there.
+ * Exactly half visible does not count.
+ */
+export function shouldPanTo(block: Aabb, viewport: Aabb): boolean {
   const area = boxW(block) * boxH(block);
   if (area <= 0) {
     // A degenerate block (a line, a point): judge by its centre.

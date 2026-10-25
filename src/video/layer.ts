@@ -8,34 +8,58 @@
 //
 // A card plays only while it is on screen and at least MIN_SCREEN_PX wide (hover / selection) and the
 // camera is not moving. The poster is the card's own texture, drawn by WebGL underneath the <video>.
+import type { BoardErrorEvent } from '../errors';
 import type { Store } from '../store';
 import type { FrameRateMonitor } from '../render/frameRate';
 import type { Stage } from '../render/stage';
-import type { ElementId } from '../types';
+import type { CardId } from '../types';
 import { AmbientVideos } from './ambient';
 import type { AmbientCandidate } from './ambientPolicy';
 import { VideoOverlay, type VideoTarget } from './video';
 import { VideoController } from './videoController';
 
+/**
+ * How videos play. `'always'`: every video card in view plays on its own, muted and looping (a pool, limited by
+ * `maxPlaying`); hover and selection still play a card with sound when `muted` is false. `'hover'`: a hovered card plays
+ * after a short delay, a single selected card plays at once. `'off'`: nothing plays, video cards are their poster.
+ */
 export type VideoMode = 'always' | 'hover' | 'off';
 
+/** Options of the video layer (`CorkboardOptions.video`, `board.video.setOptions()`). A card plays only while it is on screen and the camera is still. */
 export interface VideoOptions {
-  // Default 'always'.
+  /**
+   * How videos play.
+   * @default 'always'
+   */
   mode?: VideoMode;
-  // Loop the videos (default true).
+  /**
+   * Loop the videos.
+   * @default true
+   */
   loop?: boolean;
-  // Mute the videos (default true). Only a hovered / selected card can play with sound, and only in a
-  // page that has had a user gesture (autoplay policy).
+  /**
+   * Mute the videos. Only a hovered / selected card can play with sound, and only in a page that has had a user gesture (autoplay policy).
+   * @default true
+   */
   muted?: boolean;
-  // `mode: 'always'`: a card plays on its own only if its long side is at least this many CSS px on screen
-  // (default 160). Smaller ones stay a thumbnail.
+  /**
+   * `mode: 'always'`: a card plays on its own only if its long side is at least this many CSS px on screen. Smaller ones stay a thumbnail.
+   * @default 160
+   */
   minPlayPx?: number;
-  // `mode: 'always'`: at most this many cards play at once on a mouse / pen device (default 8) ...
+  /**
+   * `mode: 'always'`: at most this many cards play at once on a mouse / pen device. The biggest and most central cards win.
+   * @default 8
+   */
   maxPlaying?: number;
-  // ... and on a touch device (default 2). The biggest and most central cards win.
+  /**
+   * `mode: 'always'`: at most this many cards play at once on a touch device.
+   * @default 2
+   */
   maxPlayingTouch?: number;
 }
 
+/** What the video layer is given by the board. */
 export interface VideoLayerDeps {
   // The DOM layer the <video> elements go in (position: absolute, covering the canvas).
   root: HTMLElement;
@@ -43,8 +67,13 @@ export interface VideoLayerDeps {
   stage: Stage;
   // The board's frame-rate monitor: with `mode: 'always'` the pool plays fewer clips while the page is slow.
   frameRate?: FrameRateMonitor;
+  // `nonce` of the injected <style> (a CSP with a nonce-based `style-src`).
+  nonce?: string;
+  // A <video> that would not load (once per card and file).
+  onError?: (e: BoardErrorEvent) => void;
 }
 
+/** Plays the videos of the video cards: the hover / selection overlay and the always-playing pool. The board owns one; reach it with `getInternals`. */
 export class VideoLayer {
   private readonly overlay: VideoOverlay;
   private readonly controller: VideoController;
@@ -60,10 +89,20 @@ export class VideoLayer {
   private readonly cleanups: (() => void)[] = [];
 
   constructor(deps: VideoLayerDeps, options: VideoOptions = {}) {
-    const { root, store, stage, frameRate } = deps;
+    const { root, store, stage, frameRate, onError, nonce } = deps;
     this.store = store;
     this.stage = stage;
-    this.overlay = new VideoOverlay(root);
+    // The hover overlay and the pool can both fail on the same file: the host hears of a card + file once.
+    const reported = new Set<string>();
+    const fail =
+      onError &&
+      ((t: { id: string; src: string }, cause: unknown): void => {
+        const tag = `${t.id}|${t.src}`;
+        if (reported.has(tag)) return;
+        reported.add(tag);
+        onError({ kind: 'video', id: t.id, url: t.src, cause });
+      });
+    this.overlay = new VideoOverlay(root, { nonce, onError: fail });
     const doc = root.ownerDocument;
     this.hidden = doc.visibilityState === 'hidden';
     const onVisibility = (): void => this.setHidden(doc.visibilityState === 'hidden');
@@ -83,6 +122,8 @@ export class VideoLayer {
       // Which cards the pool plays decides whether the hover overlay has anything to add.
       onChange: () => this.controller.recheck(),
       frameRate,
+      nonce,
+      onError: fail,
     });
     this.controller = new VideoController({
       show: (id) => {
@@ -128,11 +169,16 @@ export class VideoLayer {
     this.controller.recheck();
   }
 
-  get playing(): ReadonlySet<ElementId> {
-    const ids = new Set<ElementId>(this.ambient.playingIds);
+  get playing(): ReadonlySet<CardId> {
+    const ids = new Set<CardId>(this.ambient.playingIds);
     const active = this.overlay.activeId;
     if (active !== null) ids.add(active);
     return ids;
+  }
+
+  // Whether `setPaused(true)` is in effect.
+  get isPaused(): boolean {
+    return this.paused;
   }
 
   // How many clips the pool may play now: `maxPlaying`, lowered while the page runs slow (read it with `playing`).
@@ -141,11 +187,11 @@ export class VideoLayer {
   }
 
   // The pointer is over a video card (null: none).
-  setHover(id: ElementId | null): void {
+  setHover(id: CardId | null): void {
     this.controller.setHover(id);
   }
 
-  setSelection(ids: readonly ElementId[]): void {
+  setSelection(ids: readonly CardId[]): void {
     this.controller.setSelection(ids);
   }
 
@@ -207,7 +253,7 @@ export class VideoLayer {
     else this.overlay.resume();
   }
 
-  private showOverlay(id: ElementId, load = true): void {
+  private showOverlay(id: CardId, load = true): void {
     const t = this.targetOf(id);
     if (!t) return;
     this.overlay.show(t, this.stage.cam.cam, load);
@@ -215,7 +261,7 @@ export class VideoLayer {
     if (this.hidden) this.overlay.suspend();
   }
 
-  private targetOf(id: ElementId): VideoTarget | null {
+  private targetOf(id: CardId): VideoTarget | null {
     const el = this.store.get(id);
     if (!el || !el.media.video) return null;
     // The live drag / resize preview, else the store's.

@@ -38,18 +38,6 @@ interface Series {
   hover: number | null;
 }
 
-// The board's per-render GPU times since the last read (ms), from its timer ring. `stats()` only reports
-// percentiles over its whole history, and a live chart needs the latest moments.
-function gpuSince(board: Corkboard, cursor: { n: number }): number[] {
-  const s = board.stage as unknown as { gpuMs?: Float32Array; nGpu?: number };
-  if (!s.gpuMs || typeof s.nGpu !== 'number') return [];
-  const out: number[] = [];
-  const from = Math.max(cursor.n, s.nGpu - s.gpuMs.length);
-  for (let i = from; i < s.nGpu; i++) out.push(s.gpuMs[i & (s.gpuMs.length - 1)]);
-  cursor.n = s.nGpu;
-  return out;
-}
-
 export function startPerfPanel(host: HTMLElement, board: Corkboard): () => void {
   const style = document.createElement('style');
   style.textContent = STYLE;
@@ -120,7 +108,12 @@ export function startPerfPanel(host: HTMLElement, board: Corkboard): () => void 
   };
   readTheme();
 
-  const cursor = { n: 0 };
+  // The board's GPU timer results (ms) since the last sample, from its `render` event: `stats()` only has
+  // percentiles over the whole history, and a live chart needs the latest moments.
+  let gpuBatch: number[] = [];
+  const offRender = board.on('render', (e) => {
+    for (const ms of e.gpuMs) gpuBatch.push(ms);
+  });
   let gpuOff = false;
   let vramMb: number | null = null;
   let statsAt = 0;
@@ -136,11 +129,12 @@ export function startPerfPanel(host: HTMLElement, board: Corkboard): () => void 
     // `stats()` sorts its history: once a second is enough for what only it knows.
     if (now - statsAt >= 1000) {
       statsAt = now;
-      const st = board.stats() as { gpuMs?: unknown; textureBytes?: number };
-      gpuOff = typeof st.gpuMs !== 'object';
-      vramMb = typeof st.textureBytes === 'number' ? st.textureBytes / 1048576 : null;
+      const st = board.stats();
+      gpuOff = st.render.gpuTimer !== 'on';
+      vramMb = st.textures.bytes / 1048576;
     }
-    const g = gpuSince(board, cursor);
+    const g = gpuBatch;
+    gpuBatch = [];
     gpu.none = gpuOff ? 'n/a' : 'idle';
     push(gpu, gpuOff || g.length === 0 ? null : g.reduce((a, b) => a + b, 0) / g.length);
     push(vram, vramMb);
@@ -271,6 +265,7 @@ export function startPerfPanel(host: HTMLElement, board: Corkboard): () => void 
 
   return () => {
     clearInterval(timer);
+    offRender();
     cancelAnimationFrame(raf);
     if (hasIdle) cancelIdleCallback(ric);
     root.remove();

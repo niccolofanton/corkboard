@@ -27,10 +27,10 @@ export type EmbedOp = 'pause' | 'resume' | 'snapshot';
 // Written readable below; shipped without its whole-line comments and indentation (it goes into every snippet).
 const SOURCE = `(function () {
 var CB = '${EMBED_CB}';
-var raf = window.requestAnimationFrame.bind(window), caf = window.cancelAnimationFrame.bind(window);
+var raf = requestAnimationFrame.bind(window), caf = cancelAnimationFrame.bind(window);
 var paused = false, n = 0, pend = {}, hand = {}, stopped = [];
-var st = window.setTimeout.bind(window), ct = window.clearTimeout.bind(window);
-var si = window.setInterval.bind(window), ci = window.clearInterval.bind(window);
+var st = setTimeout.bind(window), ct = clearTimeout.bind(window);
+var si = setInterval.bind(window), ci = clearInterval.bind(window);
 var tm = {}, tn = 0, held = [];
 
 // requestAnimationFrame behind a gate: while paused, callbacks wait and run on resume.
@@ -54,7 +54,7 @@ window.cancelAnimationFrame = function (id) {
 function timer(set, clear, again) {
   return function (f, ms) {
     if (typeof f !== 'function') return set.apply(window, arguments);
-    var args = [].slice.call(arguments, 2), t = { id: ++tn, held: false, clear: clear };
+    var args = [].slice.call(arguments, 2), t = { id: ++tn, clear: clear };
     t.go = function () {
       if (!again) delete tm[t.id];
       f.apply(window, args);
@@ -84,8 +84,8 @@ function setPaused(p) {
   var id;
   if (p) {
     for (id in hand) { caf(hand[id]); delete hand[id]; }
-    stopped = document.getAnimations().filter(function (a) { return a.playState === 'running'; });
-    stopped.forEach(function (a) { a.pause(); });
+    stopped = document.getAnimations().filter(a => a.playState === 'running');
+    stopped.forEach(a => a.pause());
   } else {
     for (id in pend) if (hand[id] === undefined) sched(id);
     stopped.forEach(function (a) { if (a.playState === 'paused') a.play(); });
@@ -108,8 +108,8 @@ function animated() {
     if (a.transitionProperty) s.add(a.transitionProperty);
     ef.getKeyframes().forEach(function (k) {
       for (var p in k) {
-        if (p === 'offset' || p === 'easing' || p === 'composite' || p === 'computedOffset') continue;
-        s.add(p === 'cssFloat' ? 'float' : p.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }));
+        if (/^(offset|easing|composite|computedOffset)$/.test(p)) continue;
+        s.add(p === 'cssFloat' ? 'float' : p.replace(/[A-Z]/g, c => '-' + c.toLowerCase()));
       }
     });
     m.set(ef.target, s);
@@ -175,12 +175,11 @@ addEventListener('message', function (e) {
   else if (d.op === 'resume') setPaused(false);
   else if (d.op === 'snapshot') {
     var svg = null;
-    try { svg = snapshot(d.vw, d.vh); } catch (err) { svg = null; }
+    try { svg = snapshot(d.vw, d.vh); } catch (err) {}
     // The parent's origin is known from its message; an opaque one cannot be a target.
     parent.postMessage({ cb: CB, op: 'snapshot', id: d.id, ok: !!svg, svg: svg || undefined }, e.origin === 'null' ? '*' : e.origin);
   }
 });
 })();`;
 
-export const SNIPPET_BOOTSTRAP = SOURCE.replace(/^[ \t]*\/\/.*\n/gm, '').replace(/^[ \t]+/gm, '');
-
+export const SNIPPET_BOOTSTRAP = SOURCE.replace(/^[ \t]*\/\/.*\n/gm, '').replace(/^[ \t]+/gm, '').replace(/\n{2,}/g, '\n');

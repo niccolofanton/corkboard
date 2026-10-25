@@ -1,6 +1,6 @@
 {
   "name": "@niccolofanton/corkboard",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "An infinite canvas of media cards on WebGL: culling, LOD textures, video overlays, auto layout and snapping.",
   "license": "MIT",
   "author": "Niccolò Fanton",
@@ -39,6 +39,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/corkboard.js"
     },
+    "./unstable": {
+      "types": "./dist/unstable.d.ts",
+      "import": "./dist/unstable.js"
+    },
     "./decode.worker.js": {
       "types": "./dist/decode.worker.d.ts",
       "default": "./dist/decode.worker.js"
@@ -59,8 +63,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check:package": "publint && attw --pack . --profile esm-only",
-    "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build"
+    "build:e2e": "vite build --mode e2e --outDir dist-e2e",
+    "check:package": "publint && attw --pack . --profile esm-only && node scripts/check-dist.mjs",
+    "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build && pnpm check:package && pnpm test:e2e",
+    "test:e2e": "pnpm build:e2e && playwright test"
   },
   "dependencies": {
     "rbush": "^4.0.1",
@@ -71,6 +77,7 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
+    "@playwright/test": "^1.64.1",
     "@types/node": "^22.0.0",
     "@types/rbush": "^4.0.0",
     "jsdom": "^24.1.3",

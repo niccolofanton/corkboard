@@ -77,7 +77,7 @@ import type { Store, StoreEvent } from '../store';
 import type { Theme } from '../render/theme';
 import { elementBox } from '../interact/geometry';
 import { FrameRateMonitor, SMOOTH_WINDOWS, type FrameWindow } from '../render/frameRate';
-import type { Element, ElementId, EmbedResolution, EmbedSource } from '../types';
+import type { Card, CardId, EmbedResolution, EmbedSource } from '../types';
 import { DEFAULT_RESOLUTION, embedPlacement } from './geometry';
 import {
   MAX_LIVE_DESKTOP,
@@ -103,90 +103,191 @@ import {
   type ResolvedEmbed,
 } from './resolve';
 import { EMBED_CB, SNAPSHOT_MAX_SIDE, SNAPSHOT_MS } from './bootstrap';
-import { PreviewStore, previewKey, type PreviewCacheMode } from './previewCache';
-import { iframeSpecFor, type IframeSpec } from './sandbox';
+import type { BoardErrorEvent } from '../errors';
+import { PreviewStore, previewKey, previewMaterial, type PreviewCacheMode } from './previewCache';
+import { iframeSpecFor, normalizeIsolatedHosts, type IframeSpec, type SnippetNetwork } from './sandbox';
 import { drawTile, tileSpec } from './tile';
+import { acquireStyle } from '../styles';
 
+/**
+ * Options of the embed layer (`CorkboardOptions.embeds`, `board.embeds.setOptions()`). Numeric limits accept `Infinity` for
+ * "no cap". A page is a live iframe only while its card is in view and within these limits; the rest show their poster.
+ */
 export interface EmbedOptions {
-  // Live iframes at once on a mouse / pen device (default 12). Infinity: no cap.
+  /**
+   * Live iframes at once on a mouse / pen device.
+   * @default 12
+   */
   maxLive?: number;
-  // ... and on a touch device (default 3). Infinity: no cap.
+  /**
+   * Live iframes at once on a touch device.
+   * @default 3
+   */
   maxLiveTouch?: number;
-  // Mounted iframes at once, live + parked, on a mouse / pen device (default 24). Infinity: no cap.
+  /**
+   * Mounted iframes at once (live + parked) on a mouse / pen device.
+   * @default 24
+   */
   maxMounted?: number;
-  // ... and on a touch device (default 6). Infinity: no cap.
+  /**
+   * Mounted iframes at once (live + parked) on a touch device.
+   * @default 6
+   */
   maxMountedTouch?: number;
-  // Mounted iframes kept while their card is off screen (culled: hidden, not rendering, but alive), a subset of
-  // maxMounted, on a mouse / pen device (default 64). The most recently seen stay; the rest are destroyed
-  // when the camera settles. Infinity: only maxMounted limits them.
+  /**
+   * Mounted iframes kept while their card is off screen (culled: hidden, not rendering, but alive), a subset of
+   * `maxMounted`, on a mouse / pen device. The most recently seen stay; the rest are destroyed when the camera
+   * settles. `Infinity`: only `maxMounted` limits them.
+   * @default 64
+   */
   maxOffscreen?: number;
-  // ... and on a touch device (default 12). Infinity: only maxMounted limits them.
+  /**
+   * The same as `maxOffscreen`, on a touch device.
+   * @default 12
+   */
   maxOffscreenTouch?: number;
-  // How far past the viewport a card still counts as on screen, as a fraction of the viewport on each side
-  // (default CULL_MARGIN). Frames in that ring keep rendering, and cards entering it mount ahead of the pan.
+  /**
+   * How far past the viewport a card still counts as on screen, as a fraction of the viewport on each side. Frames in
+   * that ring keep rendering, and cards entering it mount ahead of the pan.
+   * @default 0.5
+   */
   cullMargin?: number;
-  // A card goes live when it is at least this big on screen, in CSS px, or selected. Default 0: any card in
-  // view, up to `maxLive`, the biggest on screen first. A number is the width; the height keeps a 320:200 ratio.
+  /**
+   * A card goes live when it is at least this big on screen, in CSS px, or selected. Default 0: any card in view, up
+   * to `maxLive`, the biggest on screen first. A number is the width; the height keeps a 320:200 ratio.
+   */
   minLivePx?: number | { w: number; h: number };
-  // Below this zoom no new iframe mounts (default 0: any zoom). Interacting still flies in to MIN_LIVE_SCALE.
+  /**
+   * Below this zoom no new iframe mounts. Interacting still flies in to a zoom of 0.25.
+   * @default 0 (any zoom)
+   */
   minLiveScale?: number;
-  // Async lookup for what the browser cannot know: oEmbed thumbnails and titles, og:image, screenshots,
-  // and whether the page may be framed at all. Runs on a server of yours. See EmbedResolver.
+  /**
+   * Async lookup for what the browser cannot know: oEmbed thumbnails and titles, og:image, screenshots,
+   * and whether the page may be framed at all. Runs on a server of yours. See EmbedResolver. A failed or
+   * timed-out lookup is reported through the `error` event (kind 'embed') and the card falls back to what the
+   * URL says. `setOptions` takes it too (it cannot be unset): it applies to lookups started afterwards; cards
+   * already resolved keep their result.
+   */
   resolve?: EmbedResolver;
-  // Give up on `resolve` after this long and use what the URL says (default 4000 ms).
+  /**
+   * Give up on `resolve` after this long, ms, and use what the URL says. `board.embeds.setOptions` changes it for lookups started afterwards.
+   * @default 4000
+   */
   resolveTimeoutMs?: number;
-  // The virtual screen a live page is laid out at (default '720p'); a card's `embed.resolution` wins.
+  /**
+   * The virtual screen a live page is laid out at; a card's `embed.resolution` wins.
+   * @default '720p'
+   */
   resolution?: EmbedResolution;
-  // Keep `allow-same-origin` in the sandbox of arbitrary (non-provider) URLs (default true). Many sites break
-  // without their own cookies and storage, but the frame then keeps its real origin across the navigations
-  // it makes. false: those frames get an opaque origin. Providers and snippets are not affected.
+  /**
+   * Keep `allow-same-origin` in the sandbox of arbitrary (non-provider) URLs. Many sites break without their own
+   * cookies and storage, but the frame then keeps its real origin across the navigations it makes. `false`: those
+   * frames get an opaque origin. Providers and snippets are not affected.
+   * @default true
+   */
   arbitrarySameOrigin?: boolean;
-  // Start YouTube and Vimeo videos playing on their own, muted and looping, as soon as their card goes live
-  // (default false). Changing it remounts the live frames. Snippets run their own scripts either way.
+  /**
+   * Hosts whose frames never get `allow-same-origin` (opaque origin: no cookies, no storage), whatever the
+   * profile. Each entry is normalised once: a bare host (`example.com`, `bücher.de`, `.example.com`,
+   * `*.example.com`, `example.com:443`, `::1`) or a full URL (its host is taken); case, port, a trailing dot and
+   * punycode do not matter. A URL matches a domain entry when its host equals it or is a subdomain of it
+   * (`example.com`, `.example.com` and `*.example.com` all cover `app.example.com`). An IP literal (v4 or v6)
+   * matches exactly that address and is never a suffix. A blank entry matches nothing; an entry with a path,
+   * credentials or a query, or that cannot be parsed, throws `CorkboardError` (`'invalid'`) from the constructor
+   * or `setOptions`. Judged by the URL the frame starts with only: a redirect, or a link followed in interact
+   * mode, can land on a host that is not listed. Changing it remounts the frames it affects.
+   */
+  isolatedHosts?: readonly string[];
+  /**
+   * What a snippet (`embed.html`) may load: `'images'` is pictures and fonts over https, which are still requests
+   * to any server; `'none'` is only `data:` and `blob:`: no subresource request (image, font, `fetch`...) is
+   * allowed. It is advisory, not isolation: a snippet can still navigate its own frame
+   * (`location.href = 'https://x/leak?...'`), and that request always leaves (its URL can carry data out); the CSP and
+   * the sandbox cannot stop a self-navigation. The page that answers is not under the snippet CSP either, except
+   * in Chromium, which enforces the CSP on the pages the frame navigates to (the iframe `csp` attribute) and does not
+   * run them; on other engines it runs for as long as it likes. The layer's navigation guard (see `error`) only
+   * catches accidents, such as a link clicked in interact mode. Only serving snippets from a separate origin would
+   * isolate. Applies to frames mounted after the change; a frame that is already live keeps the policy it was mounted with.
+   * @default 'images'
+   */
+  snippetNetwork?: SnippetNetwork;
+  /**
+   * Start YouTube and Vimeo videos playing on their own, muted and looping, as soon as their card goes live. Changing it remounts the live frames. Snippets run their own scripts either way.
+   * @default false
+   */
   autoplay?: boolean;
-  // Iframes loading at once (default 6). New frames mount in chunks, nearest the centre of the view first,
-  // as earlier ones finish, so a board full of embeds does not start hundreds of pages in the same frame.
-  // A frame that has not loaded after LOAD_SLOT_MS gives its slot up. Infinity: no limit.
+  /**
+   * Iframes loading at once. New frames mount in chunks, nearest the centre of the view first, as earlier ones
+   * finish, so a board full of embeds does not start hundreds of pages in the same frame. A frame that has not
+   * loaded after 8 s gives its slot up. `Infinity`: no limit.
+   * @default 6
+   */
   maxLoading?: number;
-  // A mounted card whose short side on screen drops under this many CSS px is not worth rendering (default
-  // 140). A snippet frame is frozen: it is snapshotted into the card's poster and hidden. A YouTube / Vimeo
-  // frame is paused. Both come back above 1.4x this size, when selected or in interact mode. 0: neither
-  // freezing nor size-based pausing (parked and culled frames are still paused).
+  /**
+   * A mounted card whose short side on screen drops under this many CSS px is not worth rendering. A snippet frame is
+   * frozen: it is snapshotted into the card's poster and hidden. A YouTube / Vimeo frame is paused. Both come back above
+   * 1.4x this size, when selected or in interact mode. `0`: neither freezing nor size-based pausing (parked and culled frames are still paused).
+   * @default 140
+   */
   freezePx?: number;
-  // At most this many mounted, visible frames that can be paused (snippets, YouTube / Vimeo) animate at once;
-  // the rest are paused, showing their last frame, biggest on screen and nearest the centre first (default
-  // Infinity). Pages that cannot be paused (plain URLs, Spotify, CodePen, Figma) are not counted.
+  /**
+   * At most this many mounted, visible frames that can be paused (snippets, YouTube / Vimeo) animate at once; the
+   * rest are paused, showing their last frame, biggest on screen and nearest the centre first. Pages that cannot be
+   * paused (plain URLs, Spotify, CodePen, Figma) are not counted.
+   * @default Infinity
+   */
   maxAnimating?: number;
-  // Lower the number of animating frames while the page runs under 40 fps, and raise it back (up to
-  // `maxAnimating`) when it is smooth again (default true). false: always `maxAnimating`.
+  /**
+   * Lower the number of animating frames while the page runs under 40 fps, and raise it back (up to `maxAnimating`) when it is smooth again. `false`: always `maxAnimating`.
+   * @default true
+   */
   adaptive?: boolean;
-  // Hidden frames that render snippets which have not been live, to give their cards a real picture instead
-  // of a generated tile (default 3). 0: none, the tile stays until the card goes live.
+  /**
+   * Hidden frames that render snippets which have not been live, to give their cards a real picture instead of a generated tile. `0`: none, the tile stays until the card goes live.
+   * @default 3
+   */
   previewWorkers?: number;
-  // Where those pictures are kept (default 'memory'): this page only. 'persistent' also keeps them in Cache
-  // Storage (at most PREVIEW_PERSIST_MAX, oldest dropped first), so a reload shows them at once; it leaves
-  // pictures of the snippets on the visitor's disk, hence opt-in. Falls back to memory where Cache Storage
-  // cannot be used.
+  /**
+   * Where those pictures are kept: `'memory'` is this page only. `'persistent'` also keeps them in Cache Storage (at
+   * most 1000, oldest dropped first), so a reload shows them at once; it leaves pictures of the snippets on the
+   * visitor's disk, hence opt-in. Falls back to memory where Cache Storage cannot be used, or in an insecure context
+   * (entries are named by a SHA-256, which needs `crypto.subtle`). `{ persistent: true, name }` uses the Cache Storage
+   * entry `name` instead of the default `corkboard-previews-v2`. `Corkboard.clearPreviewCache(name?)` empties it.
+   * @default 'memory'
+   */
   previewCache?: PreviewCacheMode;
 }
 
+/** The embed layer's events, on the board's `on()` (see `CorkboardEvents`). */
 export interface EmbedEvents {
-  // Interact mode began (`active: true`) or ended on an embed card.
-  embedInteract: { id: ElementId; active: boolean };
-  // A card's iframe was mounted or destroyed.
-  embedLive: { id: ElementId; live: boolean };
-  // The card's embed was resolved. `poster` is a URL worth persisting (the host's own or a provider
-  // thumbnail), absent for a generated tile or any blob URL this layer made (they die with the page).
+  /** Interact mode began (`active: true`) or ended on an embed card. */
+  embedInteract: { id: CardId; active: boolean };
+  /** A card's iframe was mounted (`live: true`) or destroyed. */
+  embedLive: { id: CardId; live: boolean };
+  /**
+   * A card's embed was resolved. `poster` is a URL worth persisting (the host's own or a provider thumbnail), absent for a
+   * generated tile or any blob URL this layer made (they die with the page).
+   */
   embedResolved: {
-    id: ElementId;
+    id: CardId;
     provider: EmbedProvider;
     frameable: boolean;
     aspect?: number;
     title?: string;
     poster?: string;
   };
+  /**
+   * Something failed at runtime (`kind: 'embed'`): the resolver threw or timed out, or a snippet kept navigating its
+   * frame away from its document (3 times within 10 s; each time the layer put its document back, and now the card
+   * stays on its poster and `info()` says `blocked`). The navigation guard is best effort against accidents, such as a
+   * link clicked in interact mode: it is not a security boundary (see `snippetNetwork`). The card keeps working on its
+   * fallback (URL-derived info, or its poster).
+   */
+  error: BoardErrorEvent;
 }
 
+/** What the embed layer is given by the board. */
 export interface EmbedLayerDeps {
   // The DOM layer shared with the other overlays (covers the canvas, `pointer-events: none`).
   root: HTMLElement;
@@ -195,6 +296,8 @@ export interface EmbedLayerDeps {
   store: Store;
   stage: Stage;
   emit<K extends keyof EmbedEvents>(type: K, payload: EmbedEvents[K]): void;
+  // `nonce` of the injected <style> (a CSP with a nonce-based `style-src`).
+  nonce?: string;
   // The board's frame-rate monitor, shared with the video layer. Without one the layer makes its own.
   frameRate?: FrameRateMonitor;
   // The frame scheduler of that own monitor (default: the window's). A seam for tests.
@@ -226,6 +329,9 @@ interface Entry {
   // Preview queue state of a snippet card. idle: not looked at, or nothing to do; checking: asking the
   // persistent cache; queued: waits for a studio; running: in a studio; done / failed: over.
   pv: 'idle' | 'checking' | 'queued' | 'running' | 'done' | 'failed';
+  // A snippet whose frame kept navigating away from its document (see `guardLoad`): it never goes live again
+  // (until its content changes, which makes a new entry).
+  blocked: boolean;
   // Jobs that ended without a picture.
   pvTries: number;
   // The key of its preview when it was queued (jobs on the same one are not run side by side).
@@ -243,6 +349,7 @@ interface Studio {
 
 interface PreviewPlan {
   key: string;
+  material: string;
   // The virtual screen the snippet is laid out at, and the size of its picture.
   vw: number;
   vh: number;
@@ -251,7 +358,7 @@ interface PreviewPlan {
 }
 
 interface PreviewJob {
-  id: ElementId;
+  id: CardId;
   entry: Entry;
   token: number;
   studio: Studio | null;
@@ -304,6 +411,12 @@ interface Frame {
   // The reply is in and its picture is being drawn here: the frame is not asked again until it is applied
   // (the snapshot slot is already free for the others).
   drawing: boolean;
+  // Snippet navigation guard (see `guardLoad`): the window the iframe had at the last accepted load, when the
+  // layer last put the document back (its next load is that document, not a navigation), and the times of the
+  // strikes (Date.now()) still within NAV_STRIKE_MS.
+  win: Window | null;
+  restoring: boolean;
+  strikes: number[];
   // Snippet: the last op sent (true: pause). Video: this layer paused the player.
   paused: boolean;
   // The user has had the frame in interact mode, so a video in it may be playing without autoplay.
@@ -314,29 +427,41 @@ interface Frame {
   overBudget: boolean;
 }
 
+// A snippet's frame that loads something other than its own document is given its document back; this many times
+// within NAV_STRIKE_MS and the card is blocked (until its content changes) and an `error` is emitted.
+export const NAV_STRIKES = 3;
+export const NAV_STRIKE_MS = 10_000;
 export const MAX_LOADING = 6;
 export const LOAD_SLOT_MS = 8000;
-// A card counts as on screen this far outside the viewport too (fraction of the viewport, each side), so frames
-// just past the edge stay visible and a small pan does not hide and show them.
+/**
+ * A card counts as on screen this far outside the viewport too (fraction of the viewport, each side), so frames
+ * just past the edge stay visible and a small pan does not hide and show them.
+ */
 export const CULL_MARGIN = 0.5;
-// Under this short side on screen (CSS px) a frame is frozen or paused, and above FREEZE_HYSTERESIS times it
-// it comes back, so a card hovering around the size does not flip.
+/**
+ * Under this short side on screen (CSS px) a frame is frozen or paused, and above FREEZE_HYSTERESIS times it
+ * it comes back, so a card hovering around the size does not flip.
+ */
 export const FREEZE_PX = 140;
 export const FREEZE_HYSTERESIS = 1.4;
-// While the page stays slow with the animating budget at its floor, the size under which snippets freeze is
-// raised by FREEZE_STEP per slow window, up to FREEZE_MAX_MUL x `freezePx`, and lowered back the same way.
+/**
+ * While the page stays slow with the animating budget at its floor, the size under which snippets freeze is
+ * raised by FREEZE_STEP per slow window, up to FREEZE_MAX_MUL x `freezePx`, and lowered back the same way.
+ */
 export const FREEZE_STEP = 1.5;
 export const FREEZE_MAX_MUL = 4;
-// Snapshots asked for at once: each is main-thread work in the frame.
+/** Snapshots asked for at once: each is main-thread work in the frame. */
 export const MAX_SNAPSHOTS = 6;
-// A frame that leaves the view is hidden once its snapshot is in, or this long after it was asked for.
+/** A frame that leaves the view is hidden once its snapshot is in, or this long after it was asked for. */
 export const CULL_SNAPSHOT_MS = 400;
-// At most one such snapshot per frame in this time, so panning back and forth does not redo the work.
+/** At most one such snapshot per frame in this time, so panning back and forth does not redo the work. */
 export const CULL_SNAPSHOT_MIN_MS = 3000;
 // ... and only while this many of the MAX_SNAPSHOTS slots are free, so freezing is never starved.
 const CULL_SNAPSHOT_RESERVE = 2;
-// No snapshot on the way out while the camera moves faster than this (screen px per ms): the frame is hidden at
-// once, the pan is not slowed down by main-thread work for pictures nobody will look at.
+/**
+ * No snapshot on the way out while the camera moves faster than this (screen px per ms): the frame is hidden at
+ * once, the pan is not slowed down by main-thread work for pictures nobody will look at.
+ */
 export const CULL_SNAPSHOT_MAX_SPEED = 1.5;
 // A frame gap longer than this is idle time, not a measure of speed.
 const SPEED_MAX_DT_MS = 100;
@@ -353,17 +478,21 @@ const SNAP_TRIES = 3;
 const LAND_FIRST_MS = 200;
 const LAND_STEP_MS = 100;
 const LAND_TRIES = 30;
-// The animating budget never adapts below this many frames.
+/** The animating budget never adapts below this many frames. */
 export const MIN_ANIMATING = 6;
-// fps is read by the board's FrameRateMonitor (render/frameRate.ts, in bursts); under SLOW_FPS the budget
-// shrinks to 70% of what animates, and after SMOOTH_WINDOWS in a row over SMOOTH_FPS it grows by a quarter (+2).
+/**
+ * fps is read by the board's FrameRateMonitor (render/frameRate.ts, in bursts); under SLOW_FPS the budget
+ * shrinks to 70% of what animates, and after SMOOTH_WINDOWS in a row over SMOOTH_FPS it grows by a quarter (+2).
+ */
 export { SAMPLE_WINDOW_MS, SLOW_FPS, SMOOTH_FPS, SMOOTH_WINDOWS } from '../render/frameRate';
 // A video player is sent its command again this long after the frame loaded (the first may be too early).
 const PLAYER_READY_MS = 1500;
 
-// Previews: a snippet is asked for its picture this long after it loaded (so it has moved on from its first
-// frame), a job is given up after PREVIEW_JOB_MS, and drawing the reply after PREVIEW_DRAW_MS. A card gets at
-// most PREVIEW_TRIES jobs.
+/**
+ * Previews: a snippet is asked for its picture this long after it loaded (so it has moved on from its first
+ * frame), a job is given up after PREVIEW_JOB_MS, and drawing the reply after PREVIEW_DRAW_MS. A card gets at
+ * most PREVIEW_TRIES jobs.
+ */
 export const PREVIEW_WORKERS = 3;
 export const PREVIEW_SETTLE_MS = 400;
 export const PREVIEW_JOB_MS = 4000;
@@ -394,6 +523,13 @@ const CSS = `
 .cb-embed-done:focus-visible{outline:2px solid #6aa6ff;outline-offset:2px}
 @media (prefers-reduced-motion:reduce){.cb-embed,.cb-embed iframe{transition:none}.cb-embed-spin::after{animation-duration:3s}}
 `;
+const SHEET = {
+  selector: `style#${STYLE_ID}`,
+  mark: (el: HTMLStyleElement): void => {
+    el.id = STYLE_ID;
+  },
+  css: CSS,
+};
 
 const DONE_MARGIN = 10;
 // Flying in on a card to interact with it: the screen padding around it, and a hair over the zoom a frame
@@ -421,6 +557,7 @@ const normMinLive = (m: EmbedOptions['minLivePx']): { w: number; h: number } =>
       ? { w: m, h: (m * MIN_LIVE_H) / MIN_LIVE_W }
       : m;
 
+/** The live iframes of the embed cards: mounting, limits, parking, freezing, previews and interact mode. The board owns one; reach it with `getInternals`. */
 export class EmbedLayer {
   private readonly root: HTMLElement;
   private readonly host: HTMLElement;
@@ -428,8 +565,8 @@ export class EmbedLayer {
   private readonly stage: Stage;
   private readonly emit: EmbedLayerDeps['emit'];
   private readonly doc: Document;
-  private readonly entries = new Map<ElementId, Entry>();
-  private readonly frames = new Map<ElementId, Frame>();
+  private readonly entries = new Map<CardId, Entry>();
+  private readonly frames = new Map<CardId, Frame>();
   private readonly done: HTMLButtonElement;
   private readonly cleanups: (() => void)[] = [];
   // Pending revokes of retired poster blobs: timer -> URL (dispose revokes the rest at once).
@@ -441,6 +578,8 @@ export class EmbedLayer {
     resolve?: EmbedResolver;
     resolution: EmbedResolution;
     arbitrarySameOrigin: boolean;
+    isolatedHosts: readonly string[];
+    snippetNetwork: SnippetNetwork;
     autoplay: boolean;
     maxLoading: number;
     freezePx: number;
@@ -448,13 +587,13 @@ export class EmbedLayer {
     adaptive: boolean;
     previewWorkers: number;
   };
-  private selected = new Set<ElementId>();
+  private selected = new Set<CardId>();
   private touch = false;
   private moving = false;
   private planDirty = false;
-  private interactId: ElementId | null = null;
+  private interactId: CardId | null = null;
   // Double-click on a card too small to mount (zoomed far out): fly to it, then interact.
-  private pendingInteract: ElementId | null = null;
+  private pendingInteract: CardId | null = null;
   private clock = 0;
   private snapSeq = 0;
   // Snapshot requests in flight.
@@ -464,7 +603,7 @@ export class EmbedLayer {
   private readonly rasterize: (svg: string, w: number, h: number) => Promise<Blob | null>;
   // The adaptive limit on animating frames (Infinity: none); the effective budget also honours maxAnimating.
   private adaptiveN = Infinity;
-  private animatingIds = new Set<ElementId>();
+  private animatingIds = new Set<CardId>();
   // Frames that were candidates for a slot at the last ranking, and how many mounted frames render (on screen,
   // not culled, not frozen): the monitor only measures while there are any, and is poked when the count moves.
   private candidates = 0;
@@ -519,6 +658,8 @@ export class EmbedLayer {
       resolve: options.resolve,
       resolution: options.resolution ?? DEFAULT_RESOLUTION,
       arbitrarySameOrigin: options.arbitrarySameOrigin ?? true,
+      isolatedHosts: normalizeIsolatedHosts(options.isolatedHosts),
+      snippetNetwork: options.snippetNetwork ?? 'images',
       autoplay: options.autoplay ?? false,
       maxLoading: options.maxLoading ?? MAX_LOADING,
       freezePx: options.freezePx ?? FREEZE_PX,
@@ -528,12 +669,7 @@ export class EmbedLayer {
     };
     this.previews = new PreviewStore(options.previewCache ?? 'memory');
 
-    if (!this.doc.getElementById(STYLE_ID)) {
-      const style = this.doc.createElement('style');
-      style.id = STYLE_ID;
-      style.textContent = CSS;
-      this.doc.head.appendChild(style);
-    }
+    this.cleanups.push(acquireStyle(this.doc, SHEET, deps.nonce));
     this.root = this.doc.createElement('div');
     this.root.style.cssText = 'position:absolute;inset:0;overflow:hidden;pointer-events:none;';
     deps.root.appendChild(this.root);
@@ -594,35 +730,35 @@ export class EmbedLayer {
 
   // ── Public ─────────────────────────────────────────────────────────────────
   // Ids of the cards that hold a mounted iframe now (active and parked).
-  get live(): ReadonlySet<ElementId> {
+  get live(): ReadonlySet<CardId> {
     return new Set(this.frames.keys());
   }
 
   // ... of which these are parked: mounted but inert, showing their last frame.
-  get parked(): ReadonlySet<ElementId> {
-    const out = new Set<ElementId>();
+  get parked(): ReadonlySet<CardId> {
+    const out = new Set<CardId>();
     for (const [id, f] of this.frames) if (f.wrapper.dataset.parked !== undefined) out.add(id);
     return out;
   }
 
   // ... and of those, these are off screen: hidden (`data-culled`), not rendering, still alive.
-  get culled(): ReadonlySet<ElementId> {
-    const out = new Set<ElementId>();
+  get culled(): ReadonlySet<CardId> {
+    const out = new Set<CardId>();
     for (const [id, f] of this.frames) if (f.culled) out.add(id);
     return out;
   }
 
   // ... and these are frozen: a snapshot is their poster and the frame is hidden (`data-frozen`), alive.
-  get frozen(): ReadonlySet<ElementId> {
-    const out = new Set<ElementId>();
+  get frozen(): ReadonlySet<CardId> {
+    const out = new Set<CardId>();
     for (const [id, f] of this.frames) if (f.frozen) out.add(id);
     return out;
   }
 
   // ... and of those, these animate: they can be paused and are within the animating budget. A page that
   // cannot be paused is never in it (it takes no slot), nor is a parked, culled or frozen frame.
-  get animating(): ReadonlySet<ElementId> {
-    const out = new Set<ElementId>();
+  get animating(): ReadonlySet<CardId> {
+    const out = new Set<CardId>();
     for (const id of this.animatingIds) if (this.frames.has(id)) out.add(id);
     return out;
   }
@@ -639,14 +775,14 @@ export class EmbedLayer {
   }
 
   // Ids of the cards whose iframe is mounted and still loading (the spinner shows).
-  get loading(): ReadonlySet<ElementId> {
-    const out = new Set<ElementId>();
+  get loading(): ReadonlySet<CardId> {
+    const out = new Set<CardId>();
     for (const [id, f] of this.frames) if (!f.loaded) out.add(id);
     return out;
   }
 
   // The card in interact mode (null: none).
-  get interacting(): ElementId | null {
+  get interacting(): CardId | null {
     return this.interactId;
   }
 
@@ -663,8 +799,11 @@ export class EmbedLayer {
   }
 
   // What is known about a card's embed (null: not an embed card).
-  info(id: ElementId): Readonly<ResolvedEmbed> | null {
-    return this.entries.get(id)?.info ?? null;
+  // A blocked snippet (see `guardLoad`) says so, and that it is not frameable; a content change clears it.
+  info(id: CardId): Readonly<ResolvedEmbed> | null {
+    const e = this.entries.get(id);
+    if (!e) return null;
+    return e.blocked ? Object.freeze({ ...e.info, frameable: false, blocked: true }) : e.info;
   }
 
   get resolution(): EmbedResolution {
@@ -679,6 +818,8 @@ export class EmbedLayer {
   }
 
   setOptions(o: EmbedOptions): void {
+    // First: an invalid list throws before anything else is applied.
+    const isolated = o.isolatedHosts === undefined ? undefined : normalizeIsolatedHosts(o.isolatedHosts);
     if (o.maxLive !== undefined) this.opts.maxLive = o.maxLive;
     if (o.maxLoading !== undefined) this.opts.maxLoading = o.maxLoading;
     if (o.freezePx !== undefined) this.opts.freezePx = Math.max(0, o.freezePx);
@@ -706,16 +847,23 @@ export class EmbedLayer {
       this.opts.resolution = o.resolution;
       for (const [id, f] of this.frames) this.place(id, f);
     }
+    if (o.resolve !== undefined) this.opts.resolve = o.resolve;
+    if (o.resolveTimeoutMs !== undefined) this.opts.resolveTimeoutMs = o.resolveTimeoutMs;
     const sandboxChanged = o.arbitrarySameOrigin !== undefined && o.arbitrarySameOrigin !== this.opts.arbitrarySameOrigin;
     const autoplayChanged = o.autoplay !== undefined && o.autoplay !== this.opts.autoplay;
-    if (sandboxChanged || autoplayChanged) {
+    const isolatedChanged = isolated !== undefined && !sameList(isolated, this.opts.isolatedHosts);
+    const networkChanged = o.snippetNetwork !== undefined && o.snippetNetwork !== this.opts.snippetNetwork;
+    if (sandboxChanged || autoplayChanged || isolatedChanged || networkChanged) {
       if (o.arbitrarySameOrigin !== undefined) this.opts.arbitrarySameOrigin = o.arbitrarySameOrigin;
       if (o.autoplay !== undefined) this.opts.autoplay = o.autoplay;
+      if (isolated !== undefined) this.opts.isolatedHosts = isolated;
+      if (o.snippetNetwork !== undefined) this.opts.snippetNetwork = o.snippetNetwork;
       for (const [id, e] of this.entries) {
         if (!e.ready) continue;
         const before = e.spec;
         e.spec = this.specFor(e);
-        // A live frame is rebuilt with the new sandbox or URL the next time it mounts.
+        // A live frame is rebuilt with the new sandbox or URL the next time it mounts. A snippet's document
+        // (its CSP) is not: a live snippet keeps the policy it loaded with, only frames mounted later get the new one.
         if ((e.spec?.sandbox !== before?.sandbox || e.spec?.src !== before?.src) && this.frames.has(id)) {
           this.destroyFrame(id);
         }
@@ -736,7 +884,7 @@ export class EmbedLayer {
 
   // Interact mode on a card: make it live (whatever its size) and give it pointer events. A card the page
   // refuses to frame opens its URL in a new tab instead. Returns false when there is nothing to do.
-  interact(id: ElementId): boolean {
+  interact(id: CardId): boolean {
     return this.activate(id, false);
   }
 
@@ -764,7 +912,7 @@ export class EmbedLayer {
   }
 
   // ── Board hooks ────────────────────────────────────────────────────────────
-  setSelection(ids: readonly ElementId[]): void {
+  setSelection(ids: readonly CardId[]): void {
     this.selected = new Set(ids);
     for (const id of ids) {
       const e = this.entries.get(id);
@@ -783,7 +931,7 @@ export class EmbedLayer {
     this.requestPlan();
   }
 
-  onDblClick(id: ElementId | null): void {
+  onDblClick(id: CardId | null): void {
     if (id !== null && this.entries.has(id)) this.activate(id, false);
   }
 
@@ -879,7 +1027,7 @@ export class EmbedLayer {
     this.previewScan = true;
   }
 
-  private untrack(id: ElementId): void {
+  private untrack(id: CardId): void {
     if (this.frames.has(id)) this.destroyFrame(id);
     if (this.interactId === id) this.exitInteract();
     const e = this.entries.get(id);
@@ -893,12 +1041,12 @@ export class EmbedLayer {
     this.entries.delete(id);
   }
 
-  private trackCurrent(id: ElementId): void {
+  private trackCurrent(id: CardId): void {
     const el = this.store.get(id);
     if (el) this.track(el);
   }
 
-  private track(el: Element): void {
+  private track(el: Card): void {
     const embed = el.media.embed;
     if (el.kind !== 'embed' || !embed) {
       this.untrack(el.id);
@@ -948,6 +1096,7 @@ export class EmbedLayer {
       initialAspect: el.w > 0 ? el.h / el.w : 1,
       lastUsed: prev?.lastUsed ?? 0,
       lastSeen: prev?.lastSeen ?? 0,
+      blocked: false,
       pv: 'idle',
       pvTries: 0,
       pvKey: '',
@@ -959,7 +1108,7 @@ export class EmbedLayer {
   }
 
   // The card's own title wins over the resolver's. Redraws a generated tile with the new one.
-  private retitle(id: ElementId, entry: Entry): void {
+  private retitle(id: CardId, entry: Entry): void {
     entry.info = { ...entry.info, title: entry.embed.title ?? entry.resolverTitle };
     if (entry.ready) {
       entry.spec = this.specFor(entry);
@@ -984,6 +1133,8 @@ export class EmbedLayer {
       iframeSrc: entry.info.iframeSrc ?? undefined,
       appOrigin: this.appOrigin,
       arbitrarySameOrigin: this.opts.arbitrarySameOrigin,
+      isolatedHosts: this.opts.isolatedHosts,
+      snippetNetwork: this.opts.snippetNetwork,
     });
     // Only the URL the iframe loads changes; `entry.info` keeps the plain one.
     if (spec?.src !== undefined) {
@@ -993,7 +1144,7 @@ export class EmbedLayer {
     return spec;
   }
 
-  private async resolve(id: ElementId, entry: Entry): Promise<void> {
+  private async resolve(id: CardId, entry: Entry): Promise<void> {
     // Never inside the store's change notification that got us here.
     await Promise.resolve();
     const token = entry.token;
@@ -1006,6 +1157,7 @@ export class EmbedLayer {
           answer = await withTimeout(Promise.resolve(resolver(entry.info.url)), this.opts.resolveTimeoutMs);
         } catch (err) {
           console.warn('[corkboard] embed resolver failed:', err);
+          if (alive()) this.emit('error', { kind: 'embed', id, url: entry.info.url, cause: err });
         }
       }
       if (!alive()) return;
@@ -1024,7 +1176,7 @@ export class EmbedLayer {
       Math.abs(cur - entry.initialAspect) < 0.01 &&
       Math.abs(a - cur) > 0.005
     ) {
-      this.store.update(id, { h: Math.max(1, Math.round(el.w * a)) });
+      this.store.update(id, { h: Math.max(1, Math.round(el.w * a)) }, 'system');
     }
     // A picture of the host's stays as it is; otherwise this layer supplies one.
     const hostPoster = this.needsPoster(id) ? undefined : this.store.get(id)?.media.src;
@@ -1046,13 +1198,13 @@ export class EmbedLayer {
   // this entry made (current or stale), and those of an earlier session that a saved `board.all()` or an
   // undo stack brought back, whose blob died with that page. (So a host's own `blob:` poster on an embed
   // card is replaced: give it an https or data: URL.)
-  private needsPoster(id: ElementId): boolean {
+  private needsPoster(id: CardId): boolean {
     const src = this.store.get(id)?.media.src;
     return src === undefined || src.startsWith('blob:');
   }
 
   // Returns the candidate URL that became the poster, null for a generated tile.
-  private async loadPoster(id: ElementId, entry: Entry, token: number): Promise<string | null> {
+  private async loadPoster(id: CardId, entry: Entry, token: number): Promise<string | null> {
     const alive = (): boolean => !this.disposed && this.entries.get(id) === entry && entry.token === token;
     for (const candidate of entry.info.posters) {
       const url = await fetchPoster(candidate);
@@ -1069,7 +1221,7 @@ export class EmbedLayer {
     return null;
   }
 
-  private async makeTile(id: ElementId, entry: Entry, token: number): Promise<void> {
+  private async makeTile(id: CardId, entry: Entry, token: number): Promise<void> {
     const el = this.store.get(id);
     if (!el) return;
     const theme: Theme = this.stage.activeTheme;
@@ -1079,7 +1231,7 @@ export class EmbedLayer {
     this.applyPoster(id, entry, URL.createObjectURL(blob), 'tile');
   }
 
-  private applyPoster(id: ElementId, entry: Entry, url: string, kind: 'photo' | 'tile' | 'snapshot' | 'preview'): void {
+  private applyPoster(id: CardId, entry: Entry, url: string, kind: 'photo' | 'tile' | 'snapshot' | 'preview'): void {
     // A late tile or photo never covers a real picture of the snippet: the last frame of a card that went live,
     // or its preview. A preview never covers that last frame either.
     const real = entry.ownKind === 'snapshot' || entry.ownKind === 'preview';
@@ -1104,7 +1256,7 @@ export class EmbedLayer {
   // with the page, and a store change per snapshot would reach the host's listeners and its autosave). A
   // picture of the host's in `media.src` wins over a tile or provider photo, not over a real picture of the
   // snippet (a snapshot or preview).
-  private syncOverride(id: ElementId, entry: Entry): void {
+  private syncOverride(id: CardId, entry: Entry): void {
     if (entry.ownUrl === null) return;
     const real = entry.ownKind === 'snapshot' || entry.ownKind === 'preview';
     this.stage.setPosterOverride(id, real || this.needsPoster(id) ? entry.ownUrl : null);
@@ -1157,7 +1309,7 @@ export class EmbedLayer {
         onScreen,
         selected: this.selected.has(id),
         interacting: this.interactId === id,
-        frameable: entry.spec !== null,
+        frameable: entry.spec !== null && !entry.blocked,
         live: this.frames.has(id),
         lastUsed: entry.lastUsed,
         lastSeen: entry.lastSeen,
@@ -1211,12 +1363,12 @@ export class EmbedLayer {
   }
 
   // Interacting, then selected, then nearest the centre of the view.
-  private byPriority(ids: readonly ElementId[]): ElementId[] {
+  private byPriority(ids: readonly CardId[]): CardId[] {
     if (ids.length < 2) return [...ids];
     const v = this.stage.cam.visibleRect();
     const cx = (v.x0 + v.x1) / 2;
     const cy = (v.y0 + v.y1) / 2;
-    const rank = new Map<ElementId, number>();
+    const rank = new Map<CardId, number>();
     for (const id of ids) {
       const r = this.stage.previewRectOf(id) ?? this.store.get(id);
       const d = r ? Math.hypot(r.x + r.w / 2 - cx, r.y + r.h / 2 - cy) : Infinity;
@@ -1235,7 +1387,7 @@ export class EmbedLayer {
     this.requestPlan();
   }
 
-  private mountFrame(id: ElementId): void {
+  private mountFrame(id: CardId): void {
     const entry = this.entries.get(id);
     const spec = entry?.spec;
     if (!entry || !spec || this.frames.has(id)) return;
@@ -1247,6 +1399,8 @@ export class EmbedLayer {
     iframe.setAttribute('allow', spec.allow);
     iframe.setAttribute('referrerpolicy', spec.referrerPolicy);
     iframe.setAttribute('loading', spec.loading);
+    // Chromium refuses to run, in this frame, a page that does not accept the snippet's CSP (see IframeSpec.csp).
+    if (spec.csp !== undefined) iframe.setAttribute('csp', spec.csp);
     if (spec.srcdoc !== undefined) iframe.srcdoc = spec.srcdoc;
     else if (spec.src !== undefined) iframe.src = spec.src;
     const frame: Frame = {
@@ -1276,14 +1430,23 @@ export class EmbedLayer {
       landTimer: null,
       drawing: false,
       paused: false,
+      win: null,
+      restoring: false,
+      strikes: [],
       interacted: false,
       loadTimer: null,
       overBudget: false,
     };
     frame.slotTimer = setTimeout(() => this.releaseSlot(frame), LOAD_SLOT_MS);
-    // Runs for every navigation of the iframe (a snippet that reloads itself, a page that follows a link), and
-    // each one is a new document: it knows nothing of what the previous one was told or asked.
+    // Runs for every navigation of the iframe (a page that follows a link, a snippet's frame reloaded because the
+    // host moved the board in the DOM), and each one is a new document: it knows nothing of what the previous one
+    // was told or asked.
     iframe.addEventListener('load', () => {
+      // A snippet's document is its `srcdoc`, which reloads as itself. Whatever else loads (a `location`
+      // assignment, a meta refresh, a link) is not the document the CSP and the bootstrap were written for: it is
+      // replaced by that document again (see `guardLoad`). The `about:blank` load of a frame this layer already
+      // destroyed is not looked at.
+      if (frame.kind === 'snippet' && this.frames.get(id) === frame && !this.guardLoad(id, entry, frame)) return;
       frame.loaded = true;
       // Transparent from here on (the iframe fades in): the poster under it shows until the page paints.
       wrapper.dataset.ready = '';
@@ -1321,7 +1484,49 @@ export class EmbedLayer {
     this.emit('embedLive', { id, live: true });
   }
 
-  private destroyFrame(id: ElementId): void {
+  // The navigation guard, run for each `load` of a snippet's frame. true: the load is the snippet's own document.
+  //
+  // Best effort against accidents (a link clicked in interact mode, a stray `location` assignment), not a security
+  // boundary: no frame-level signal says which document loaded (a navigation during parse means our `srcdoc` never
+  // fires `load` at all, and a page that never finishes loading fires none), so a hostile snippet can run another
+  // page in its frame for as long as it likes. Chromium does not run such a page (the `csp` attribute), other
+  // engines do.
+  //  - the first load, a load with a new `contentWindow` (the host moved the board in the DOM: a reparented
+  //    iframe is a new browsing context that reloads its `srcdoc`), and the load of the document this layer put
+  //    back are accepted;
+  //  - any other load is a navigation: the `srcdoc` is assigned again (the frame loads its own document back)
+  //    and it counts as a strike; NAV_STRIKES within NAV_STRIKE_MS block the card.
+  private guardLoad(id: CardId, entry: Entry, f: Frame): boolean {
+    const win = f.iframe.contentWindow;
+    if (f.win === null || win !== f.win) {
+      f.win = win;
+      f.restoring = false;
+      return true;
+    }
+    if (f.restoring) {
+      f.restoring = false;
+      return true;
+    }
+    const now = Date.now();
+    f.strikes = f.strikes.filter((t) => now - t < NAV_STRIKE_MS);
+    f.strikes.push(now);
+    if (f.strikes.length >= NAV_STRIKES) this.blockSnippet(id, entry);
+    else {
+      f.restoring = true;
+      f.iframe.srcdoc = f.iframe.srcdoc;
+    }
+    return false;
+  }
+
+  private blockSnippet(id: CardId, entry: Entry): void {
+    if (this.disposed || this.entries.get(id) !== entry) return;
+    entry.blocked = true;
+    this.destroyFrame(id);
+    this.emit('error', { kind: 'embed', id, cause: new Error('snippet navigated away from its document') });
+    this.requestPlan();
+  }
+
+  private destroyFrame(id: CardId): void {
     const f = this.frames.get(id);
     if (!f) return;
     this.frames.delete(id);
@@ -1344,7 +1549,7 @@ export class EmbedLayer {
 
   // Writes size and transform only when they changed.
   // `view`: the cull rect (computed once per frame by the caller); `seen`: stamp for cards in view.
-  private place(id: ElementId, f: Frame, view: Rect = this.cullRect(), seen = 0): void {
+  private place(id: CardId, f: Frame, view: Rect = this.cullRect(), seen = 0): void {
     const r = this.stage.previewRectOf(id) ?? this.store.get(id);
     if (!r) return;
     // The card in interact mode is never hidden. A rotated card is tested by its bounding box.
@@ -1401,7 +1606,7 @@ export class EmbedLayer {
   // ── Leaving and returning ──────────────────────────────────────────────────
   // The card left the view. A loaded snippet is snapshotted first and hidden when that is done (its last frame
   // then waits as the poster); anything else is hidden at once.
-  private cull(id: ElementId, f: Frame): void {
+  private cull(id: CardId, f: Frame): void {
     if (!this.canSnapCull(id, f) || !this.requestSnapshot(id, f, true)) {
       f.wrapper.dataset.culled = '';
       return;
@@ -1411,7 +1616,7 @@ export class EmbedLayer {
     f.cullSnapAt = Date.now();
   }
 
-  private canSnapCull(id: ElementId, f: Frame): boolean {
+  private canSnapCull(id: CardId, f: Frame): boolean {
     return (
       f.kind === 'snippet' &&
       f.loaded &&
@@ -1451,7 +1656,7 @@ export class EmbedLayer {
   // ── Freeze and pause ───────────────────────────────────────────────────────
   // Decides what a mounted frame does with its card's size, selection and parking. Cheap enough to run on
   // every frame for every frame: it writes and posts only when something changed.
-  private tune(id: ElementId, f: Frame, r: { w: number; h: number } | undefined, settled: boolean): void {
+  private tune(id: CardId, f: Frame, r: { w: number; h: number } | undefined, settled: boolean): void {
     const held = this.interactId === id || this.selected.has(id);
     if (this.interactId === id) f.interacted = true;
     const px = this.freezeThreshold;
@@ -1501,7 +1706,7 @@ export class EmbedLayer {
 
   // Sends a snippet its pause / resume, or a video player its pause / play, when what it should be doing
   // changed. `force` repeats the pause to a player that may not have been listening yet.
-  private syncPause(id: ElementId, f: Frame, force: boolean): void {
+  private syncPause(id: CardId, f: Frame, force: boolean): void {
     if (!f.loaded) return;
     const interacting = this.interactId === id;
     if (f.kind === 'snippet') {
@@ -1556,7 +1761,7 @@ export class EmbedLayer {
     const k = cam.scale;
     const cx = (v.x0 + v.x1) / 2;
     const cy = (v.y0 + v.y1) / 2;
-    const ranked: { id: ElementId; f: Frame; tier: number; area: number; dist: number }[] = [];
+    const ranked: { id: CardId; f: Frame; tier: number; area: number; dist: number }[] = [];
     let renderCount = 0;
     for (const [id, f] of this.frames) {
       if (!f.culled && !f.frozen) renderCount++;
@@ -1576,7 +1781,7 @@ export class EmbedLayer {
     }
     ranked.sort((a, b) => a.tier - b.tier || b.area - a.area || a.dist - b.dist || (a.id < b.id ? -1 : 1));
     const budget = this.animatingBudget;
-    const animating = new Set<ElementId>();
+    const animating = new Set<CardId>();
     ranked.forEach((c, i) => {
       const over = i >= budget;
       if (!over) animating.add(c.id);
@@ -1591,7 +1796,7 @@ export class EmbedLayer {
     }
   }
 
-  private setOverBudget(id: ElementId, f: Frame, over: boolean): void {
+  private setOverBudget(id: CardId, f: Frame, over: boolean): void {
     if (over === f.overBudget) return;
     f.overBudget = over;
     this.syncPause(id, f, false);
@@ -1652,7 +1857,7 @@ export class EmbedLayer {
   // ── Snapshots ──────────────────────────────────────────────────────────────
   // `cull`: the card left the view, so the picture is its last frame at full size rather than a small one.
   // Returns false when there is nothing to ask for.
-  private requestSnapshot(id: ElementId, f: Frame, cull = false): boolean {
+  private requestSnapshot(id: CardId, f: Frame, cull = false): boolean {
     const el = this.store.get(id);
     if (!el || el.w <= 0 || el.h <= 0) return false;
     // Sharp at the biggest the card gets while frozen (short side FREEZE_HYSTERESIS x the freeze size, in device px),
@@ -1714,17 +1919,18 @@ export class EmbedLayer {
 
   private onMessage(e: MessageEvent): void {
     const d = e.data as { cb?: unknown; op?: unknown; id?: unknown; ok?: unknown; svg?: unknown } | null;
-    if (this.disposed || !d || typeof d !== 'object' || d.cb !== EMBED_CB || d.op !== 'snapshot') return;
+    if (this.disposed || !d || typeof d !== 'object' || d.cb !== EMBED_CB) return;
+    if (d.op !== 'snapshot') return;
     for (const s of this.studios) {
       const job = s.job;
       if (!job || job.seq !== d.id || e.source !== s.iframe?.contentWindow) continue;
-      if (d.ok === false || typeof d.svg !== 'string' || d.svg === '') return this.previewFailed(job);
+      if (!validSvg(d)) return this.previewFailed(job);
       return this.previewReply(job, d.svg);
     }
     for (const [id, f] of this.frames) {
       // Only the frame this layer mounted, and only the answer to the request it is waiting for.
       if (e.source !== f.iframe.contentWindow || !f.snap || f.snap.id !== d.id) continue;
-      if (d.ok === false || typeof d.svg !== 'string' || d.svg === '') return this.snapshotFailed(f, f.snap.id);
+      if (!validSvg(d)) return this.snapshotFailed(f, f.snap.id);
       // The frame's markup, drawn here.
       const svg = d.svg;
       const { w, h, cull } = f.snap;
@@ -1761,7 +1967,7 @@ export class EmbedLayer {
     else setTimeout(fn, 0);
   }
 
-  private showSnapshot(id: ElementId, f: Frame, blob: Blob, cull = false): void {
+  private showSnapshot(id: CardId, f: Frame, blob: Blob, cull = false): void {
     const entry = this.entries.get(id);
     if (!entry) return;
     if (cull) {
@@ -1778,7 +1984,7 @@ export class EmbedLayer {
 
   // Hides the frame once the poster under it shows. The stage swaps textures a frame or more after the poster
   // changes, and hiding the frame before that shows the placeholder.
-  private awaitPoster(id: ElementId, f: Frame, tries: number): void {
+  private awaitPoster(id: CardId, f: Frame, tries: number): void {
     if (f.landTimer !== null) clearTimeout(f.landTimer);
     f.landTimer = setTimeout(
       () => {
@@ -1796,25 +2002,25 @@ export class EmbedLayer {
 
   // The card's sprite shows a rendition of its current poster (not the placeholder, the ThumbHash or the
   // poster it replaced, which stays on screen while the new one decodes).
-  private posterShown(id: ElementId): boolean {
+  private posterShown(id: CardId): boolean {
     return this.stage.posterShown(id);
   }
 
   // ── Previews ───────────────────────────────────────────────────────────────
   // Whether a card's poster is still no real picture of its snippet, and nothing else is about to make one: a
   // snippet (not a page), not mounted, with a tile or nothing (a picture of the host's is left alone).
-  private wantsPreview(id: ElementId, entry: Entry): boolean {
-    if (entry.info.kind !== 'html' || !entry.ready || entry.spec?.srcdoc === undefined) return false;
+  private wantsPreview(id: CardId, entry: Entry): boolean {
+    if (entry.info.kind !== 'html' || !entry.ready || entry.blocked || entry.spec?.srcdoc === undefined) return false;
     if (this.frames.has(id) || entry.ownKind === 'snapshot' || entry.ownKind === 'preview') return false;
     return entry.ownKind === 'tile' || this.needsPoster(id);
   }
 
   // What a card's preview is: the layout box a live frame would get at the card's aspect (bucketed, so cards of
   // the same shape share it), and the picture's size, as sharp as a frozen snapshot of it.
-  private previewPlan(id: ElementId, entry: Entry): PreviewPlan | null {
+  private previewPlan(id: CardId, entry: Entry): PreviewPlan | null {
     const html = entry.embed.html;
     const el = this.store.get(id);
-    if (html === undefined || !el || el.w <= 0 || el.h <= 0) return null;
+    if (html === undefined || !el || el.w <= 0 || el.h <= 0 || entry.blocked) return null;
     const bucket = Math.max(1, Math.round((el.h / el.w) * PREVIEW_BUCKETS));
     const rect = { x: 0, y: 0, w: PREVIEW_BOX, h: (PREVIEW_BOX * bucket) / PREVIEW_BUCKETS };
     const res = entry.embed.resolution ?? this.opts.resolution;
@@ -1826,7 +2032,14 @@ export class EmbedLayer {
     );
     const w = Math.max(1, Math.round(rect.w * k));
     const h = Math.max(1, Math.round(rect.h * k));
-    return { key: previewKey(html, bucket, String(res), w, h), vw: box.width, vh: box.height, w, h };
+    return {
+      key: previewKey(html, bucket, String(res), w, h),
+      material: previewMaterial(html, bucket, String(res), w, h),
+      vw: box.width,
+      vh: box.height,
+      w,
+      h,
+    };
   }
 
   // Looks at the cards that may need a preview and have not been looked at: a picture already in the cache is
@@ -1841,18 +2054,19 @@ export class EmbedLayer {
       const hit = this.previews.getMemory(plan.key);
       entry.pvKey = plan.key;
       if (hit) this.applyPreview(id, entry, hit);
-      else if (this.previews.persistent) this.lookupPreview(id, entry, plan.key);
+      else if (this.previews.persistent) this.lookupPreview(id, entry, plan.key, plan.material);
       else entry.pv = 'queued';
     }
     this.pumpPreviews();
   }
 
-  private lookupPreview(id: ElementId, entry: Entry, key: string): void {
+  private lookupPreview(id: CardId, entry: Entry, key: string, material: string): void {
     entry.pv = 'checking';
     const token = entry.token;
-    void this.previews.getPersistent(key).then((blob) => {
+    void this.previews.getPersistent(material).then((blob) => {
       if (this.disposed || this.entries.get(id) !== entry || entry.token !== token || entry.pv !== 'checking') return;
-      if (blob) this.previews.put(key, blob, false);
+      // Came from Cache Storage: not written back.
+      if (blob) this.previews.put(key, blob);
       if (!this.wantsPreview(id, entry)) entry.pv = 'idle';
       else if (blob) this.applyPreview(id, entry, blob);
       else entry.pv = 'queued';
@@ -1860,18 +2074,18 @@ export class EmbedLayer {
     });
   }
 
-  private applyPreview(id: ElementId, entry: Entry, blob: Blob): void {
+  private applyPreview(id: CardId, entry: Entry, blob: Blob): void {
     entry.pv = 'done';
     this.applyPoster(id, entry, URL.createObjectURL(blob), 'preview');
   }
 
   // Cards to render, best first: on screen, then nearest the centre of the view; a card that already failed once
   // goes after all the others.
-  private nextPreview(): { id: ElementId; entry: Entry } | null {
+  private nextPreview(): { id: CardId; entry: Entry } | null {
     const v = this.stage.cam.visibleRect();
     const cx = (v.x0 + v.x1) / 2;
     const cy = (v.y0 + v.y1) / 2;
-    let best: { id: ElementId; entry: Entry } | null = null;
+    let best: { id: CardId; entry: Entry } | null = null;
     let bestRank = Infinity;
     // The same snippet on two cards is drawn once: the second waits for the first and then takes its picture.
     const busy = new Set<string>();
@@ -1947,7 +2161,7 @@ export class EmbedLayer {
     s.box.remove();
   }
 
-  private startPreview(studio: Studio, id: ElementId, entry: Entry, plan: PreviewPlan): void {
+  private startPreview(studio: Studio, id: CardId, entry: Entry, plan: PreviewPlan): void {
     const spec = entry.spec;
     if (!spec || spec.srcdoc === undefined) return;
     const job: PreviewJob = { id, entry, token: entry.token, studio, plan, seq: 0, loaded: false, settle: null, timer: null };
@@ -1977,6 +2191,7 @@ export class EmbedLayer {
     ifr.setAttribute('sandbox', spec.sandbox);
     ifr.setAttribute('allow', spec.allow);
     ifr.setAttribute('referrerpolicy', spec.referrerPolicy);
+    if (spec.csp !== undefined) ifr.setAttribute('csp', spec.csp);
     ifr.style.width = studio.box.style.width = `${plan.vw}px`;
     ifr.style.height = studio.box.style.height = `${plan.vh}px`;
     ifr.srcdoc = spec.srcdoc;
@@ -2037,7 +2252,7 @@ export class EmbedLayer {
         this.endJob(job);
         if (!this.jobAlive(job)) return;
         if (!blob || blob.size === 0) return this.previewFailed(job);
-        this.previews.put(job.plan.key, blob);
+        this.previews.put(job.plan.key, blob, job.plan.material);
         const { id, entry } = job;
         if (this.wantsPreview(id, entry)) this.applyPreview(id, entry, blob);
         else entry.pv = 'idle';
@@ -2066,9 +2281,10 @@ export class EmbedLayer {
   // ── Interact mode ──────────────────────────────────────────────────────────
   // Fits the card, but never below the zoom a frame mounts at: a card too big for that (a 600x4000 page on
   // a short screen) is centred at that zoom instead.
-  private flyIn(id: ElementId): void {
+  private flyIn(id: CardId): void {
     const cam = this.stage.cam;
-    const r = this.stage.contentBounds([id]);
+    const r = this.stage.boundsOf([id]);
+    if (!r) return;
     const w = Math.min(r.x1 - r.x0, Math.max(1, cam.width - FLY_PAD * 2) / FLY_IN_SCALE);
     const h = Math.min(r.y1 - r.y0, Math.max(1, cam.height - FLY_PAD * 2) / FLY_IN_SCALE);
     const cx = (r.x0 + r.x1) / 2;
@@ -2077,11 +2293,12 @@ export class EmbedLayer {
   }
 
   // `flown`: the camera has already flown in for this card, so it does not fly again.
-  private activate(id: ElementId, keyboard: boolean, flown = false): boolean {
+  private activate(id: CardId, keyboard: boolean, flown = false): boolean {
     const entry = this.entries.get(id);
     const el = this.store.get(id);
     if (!entry || !el || !entry.ready) return false;
     if (this.interactId === id) return true;
+    if (entry.blocked) return false;
     if (entry.spec === null) {
       // A bookmark: the page cannot be framed.
       if (entry.info.url !== '') window.open(entry.info.url, '_blank', 'noopener,noreferrer');
@@ -2112,6 +2329,17 @@ export class EmbedLayer {
     return true;
   }
 }
+
+/**
+ * The most a snapshot reply may weigh, as the length of its SVG string (UTF-16 units, about 2 MB as sent): a
+ * page that answers with more is treated as a failed snapshot instead of being parsed and drawn here.
+ */
+export const SNAPSHOT_MAX_SVG = 2 * 1024 * 1024;
+
+const validSvg = (d: { ok?: unknown; svg?: unknown }): d is { svg: string } =>
+  d.ok !== false && typeof d.svg === 'string' && d.svg !== '' && d.svg.length <= SNAPSHOT_MAX_SVG;
+
+const sameList = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((v, i) => v === b[i]);
 
 // A number of studios: whole, never negative.
 const normWorkers = (n: number): number => (Number.isNaN(n) ? PREVIEW_WORKERS : Math.min(8, Math.max(0, Math.floor(n))));

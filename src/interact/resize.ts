@@ -5,11 +5,11 @@
 // One element resizes about the corner or edge opposite the handle (about the centre with Alt), keeping
 // its aspect when it is locked or Shift is held. Several elements scale together, uniformly, about the
 // shared box.
-import type { Box } from './geometry';
+import type { Aabb } from './geometry';
 import { DEG } from './geometry';
 import type { HandleId } from './handles';
 import { geometryBox, HANDLE_DIRS } from './handles';
-import type { ElementReader } from './reader';
+import type { CardReader } from './reader';
 
 
 export interface Mods {
@@ -24,7 +24,7 @@ export interface Mods {
 // the snapped edge. Resizing about the centre flags both edges of an axis: `edgeX` / `edgeY` then say
 // which of the two the correction belongs to (absent: the dragged one).
 export type Snapper = (
-  box: Box,
+  box: Aabb,
   edges: { left?: boolean; right?: boolean; top?: boolean; bottom?: boolean },
 ) => { dx: number; dy: number; edgeX?: 'min' | 'max'; edgeY?: 'min' | 'max' };
 
@@ -147,12 +147,12 @@ export class ResizeSession {
   private bw = 0;
   private bh = 0;
   // Snapper scratch (reused: no allocation per pointer move).
-  private readonly snapBox: Box = { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  private readonly snapBox: Aabb = { minX: 0, minY: 0, maxX: 0, maxY: 0 };
   private readonly snapEdges = { left: false, right: false, top: false, bottom: false };
   private readonly centre = { x: 0, y: 0 };
 
   constructor(
-    reader: ElementReader,
+    reader: CardReader,
     ids: readonly string[],
     handle: HandleId,
     startWorld: { x: number; y: number },

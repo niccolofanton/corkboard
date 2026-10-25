@@ -25,6 +25,9 @@
     "paths": {
       "@niccolofanton/corkboard": [
         "./src/index.ts"
+      ],
+      "@niccolofanton/corkboard/unstable": [
+        "./src/unstable.ts"
       ]
     }
   },
@@ -34,6 +37,8 @@
     "demo",
     "vite.config.ts",
     "vite.demo.config.ts",
-    "vite.worker.config.ts"
+    "vite.worker.config.ts",
+    "playwright.config.ts",
+    "e2e/*.ts"
   ]
 }

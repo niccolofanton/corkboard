@@ -8,7 +8,7 @@ import { Interaction, type InteractionEvents, type InteractionOptions } from '..
 import { createElement } from '../../src/model';
 import type { Stage } from '../../src/render/stage';
 import { Store } from '../../src/store';
-import type { ElementInit } from '../../src/types';
+import type { Card, CardInit } from '../../src/types';
 
 let host: HTMLElement;
 // jsdom reports an exception thrown by a listener on the window instead of to the dispatcher: collect them.
@@ -28,7 +28,7 @@ afterEach(() => {
   expect(errors).toEqual([]);
 });
 
-type Init = Partial<ElementInit> & { id: string };
+type Init = Partial<CardInit> & { id: string };
 const CARD_A: Init = { id: 'a', x: 0, y: 0, w: 100, h: 100 };
 const CARD_B: Init = { id: 'b', x: 200, y: 0, w: 100, h: 100 };
 
@@ -69,7 +69,7 @@ function make(options: InteractionOptions = {}, cards: Init[] = [CARD_A]) {
   } as unknown as Stage;
   const it_ = new Interaction(host, stage, store, { guides: false, grid: false } as never, options);
   store.add(
-    cards.map((c) => createElement({ media: { src: `${c.id}.jpg` }, ...c } as ElementInit, c.id)),
+    cards.map((c) => createElement({ media: { src: `${c.id}.jpg` }, ...c } as CardInit, c.id)),
   );
 
   const log = {
@@ -78,6 +78,7 @@ function make(options: InteractionOptions = {}, cards: Init[] = [CARD_A]) {
     transforms: [] as InteractionEvents['transform'][],
     hovers: [] as (string | null)[],
     selections: [] as (readonly string[])[],
+    deletes: [] as (readonly string[])[],
     order: [] as string[],
   };
   it_.events.on('gesture', (e) => {
@@ -88,6 +89,7 @@ function make(options: InteractionOptions = {}, cards: Init[] = [CARD_A]) {
     log.order.push('click');
   });
   it_.events.on('transform', (e) => void log.transforms.push(e));
+  it_.events.on('delete', (e) => void log.deletes.push(e.ids));
   it_.events.on('hover', (e) => void log.hovers.push(e.id));
   it_.events.on('selection', (e) => {
     log.selections.push(e.ids);
@@ -232,6 +234,33 @@ describe('interaction.commit: false', () => {
     ]);
   });
 
+  it('a drag writes nothing: not the move, not the order; transform carries the proposal and `toFront`', () => {
+    const { store, pointer, log } = make({ commit: false }, [CARD_A, CARD_B]);
+    const seen: unknown[] = [];
+    store.subscribe((e) => seen.push(e.change));
+    pointer('pointerdown', 50, 50);
+    pointer('pointermove', 70, 50);
+    // Still drawn on top while held.
+    expect(store.rank('a')).toBeGreaterThan(store.rank('b'));
+    pointer('pointerup', 70, 50);
+    expect(seen).toEqual([]);
+    expect(store.ids()).toEqual(['a', 'b']);
+    expect(store.rank('a')).toBe(0);
+    expect(rectOf(store, 'a')).toEqual({ x: 0, y: 0, w: 100, h: 100 });
+    expect(log.transforms).toHaveLength(1);
+    expect(log.transforms[0].kind).toBe('move');
+    expect(log.transforms[0].toFront).toEqual(['a']);
+    expect(log.transforms[0].rects.get('a')).toMatchObject({ x: 20, y: 0 });
+  });
+
+  it('Delete only proposes: the cards stay, `delete` carries the ids', () => {
+    const { store, it_, key, log } = make({ commit: false });
+    it_.setSelection(['a']);
+    key('Delete');
+    expect(store.size).toBe(1);
+    expect(log.deletes).toEqual([['a']]);
+  });
+
   it('writes the nudge to the store by default', () => {
     const { store, it_, key, log } = make();
     it_.setSelection(['a']);
@@ -307,8 +336,10 @@ describe('a gesture whose pointerup never arrives', () => {
     const m = make();
     m.pointer('pointerdown', 300, 300);
     m.it_.dispose();
+    // The pan in progress is ended by dispose itself, once; the window is not listened to any more.
+    expect(m.cam.dragEnd).toHaveBeenCalledTimes(1);
     window.dispatchEvent(new Event('blur'));
-    expect(m.cam.dragEnd).not.toHaveBeenCalled();
+    expect(m.cam.dragEnd).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -469,5 +500,147 @@ describe('the 0 key', () => {
     const full = make();
     full.key('0');
     expect(full.fit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('change source of what a gesture writes', () => {
+  const changes = (store: Store) => {
+    const seen: { source: string; updated: string[][]; removed: string[]; order?: string[] }[] = [];
+    store.subscribe((e) => {
+      const c = e.change;
+      seen.push({
+        source: c.source,
+        updated: c.updated.map((u) => [...u.props]),
+        removed: c.removed.map((r) => r.id),
+        order: c.order?.moved.map((m) => m.id),
+      });
+    });
+    return seen;
+  };
+
+  it('a drag is ONE change: the move and the bring-to-front together, "user"; the lift in between writes nothing', () => {
+    const { store, pointer } = make({}, [CARD_A, CARD_B]);
+    const seen = changes(store);
+    pointer('pointerdown', 50, 50);
+    pointer('pointermove', 70, 50);
+    // Held: drawn on top, but the store has not been written.
+    expect(seen).toEqual([]);
+    expect(store.ids()).toEqual(['a', 'b']);
+    expect(store.rank('a')).toBeGreaterThan(store.rank('b'));
+    pointer('pointerup', 70, 50);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].source).toBe('user');
+    expect(seen[0].updated.flat()).toContain('x');
+    expect(seen[0].order).toEqual(['a']);
+    expect(store.ids()).toEqual(['b', 'a']);
+    expect(store.rank('a')).toBe(1);
+  });
+
+  it('a drag of the card already on top is one change with no order', () => {
+    const { store, pointer } = make({}, [CARD_B, CARD_A]);
+    const seen = changes(store);
+    pointer('pointerdown', 50, 50);
+    pointer('pointermove', 70, 50);
+    pointer('pointerup', 70, 50);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].order).toBeUndefined();
+  });
+
+  it('a cancelled drag writes nothing and drops the lift', () => {
+    const { store, pointer } = make({}, [CARD_A, CARD_B]);
+    const seen = changes(store);
+    pointer('pointerdown', 50, 50);
+    pointer('pointermove', 70, 50);
+    window.dispatchEvent(new Event('blur'));
+    expect(seen).toEqual([]);
+    expect(store.rank('a')).toBe(0);
+  });
+
+  it('an arrow-key nudge and the Delete key are "user"', () => {
+    const { store, it_, key } = make();
+    const seen = changes(store);
+    it_.setSelection(['a']);
+    key('ArrowRight');
+    key('Delete');
+    expect(seen.map((c) => c.source)).toEqual(['user', 'user']);
+    expect(seen[1].removed).toEqual(['a']);
+  });
+});
+
+describe('setOptions', () => {
+  it('applies at once when no gesture is running', () => {
+    const { store, it_, key } = make();
+    it_.setSelection(['a']);
+    it_.setOptions({ keyboard: false });
+    key('ArrowRight');
+    expect(store.get('a')?.x).toBe(0);
+    it_.setOptions({ keyboard: true, commit: undefined });
+    key('ArrowRight');
+    expect(store.get('a')?.x).toBe(1);
+  });
+
+  it('never alters a running gesture: the change waits for the next pointer down', () => {
+    const { store, pointer, it_ } = make({}, [CARD_A]);
+    pointer('pointerdown', 50, 50);
+    pointer('pointermove', 70, 50);
+    it_.setOptions({ commit: false });
+    pointer('pointerup', 70, 50);
+    // The drag began with `commit: true`, so it was written.
+    expect(store.get('a')?.x).toBe(20);
+    pointer('pointerdown', 70, 50);
+    pointer('pointermove', 100, 50);
+    pointer('pointerup', 100, 50);
+    // The next one runs with the new option: proposed, not written.
+    expect(store.get('a')?.x).toBe(20);
+  });
+});
+
+describe('a drag cut short from outside', () => {
+  it('dispose() mid-drag drops the lift, the previews and the pins', () => {
+    const { store, it_, pointer, previews, pins } = make({}, [CARD_A, CARD_B]);
+    pointer('pointerdown', 50, 50);
+    pointer('pointermove', 70, 50);
+    expect(store.rank('a')).toBeGreaterThan(store.rank('b'));
+    expect([...pins]).toEqual(['a']);
+    it_.dispose();
+    expect(store.rank('a')).toBe(0);
+    expect(store.rank('b')).toBe(1);
+    expect(pins.size).toBe(0);
+    expect(previews.size).toBe(0);
+    expect(store.get('a')?.x).toBe(0);
+  });
+
+  it('a card added while a card is held draws below it', () => {
+    const { store, pointer } = make({}, [CARD_A, CARD_B]);
+    pointer('pointerdown', 50, 50);
+    pointer('pointermove', 70, 50);
+    store.add([createElement({ media: { src: 'c.jpg' }, id: 'c', x: 0, y: 300, w: 100, h: 100 } as CardInit, 'c')]);
+    expect(store.rank('c')).toBe(2);
+    expect(store.rank('a')).toBeGreaterThan(store.rank('c'));
+    pointer('pointerup', 70, 50);
+    expect(store.ids()).toEqual(['b', 'c', 'a']);
+  });
+
+  it('a snapshot loaded mid-drag wins over the release', () => {
+    const { store, it_, pointer, previews, pins, log } = make({}, [CARD_A, CARD_B]);
+    pointer('pointerdown', 50, 50);
+    pointer('pointermove', 70, 50);
+    // What `loadSnapshot` does: the same ids, other positions.
+    store.replaceAll(store.ids().map((id, i) => ({ ...(store.get(id) as Card), x: 1000 + i * 500 })));
+    expect(log.gestures.at(-1)).toBeNull();
+    expect(pins.size).toBe(0);
+    expect(previews.size).toBe(0);
+    pointer('pointermove', 90, 50);
+    pointer('pointerup', 90, 50);
+    expect(store.get('a')?.x).toBe(1000);
+    expect(store.get('b')?.x).toBe(1500);
+    expect(log.transforms).toEqual([]);
+    expect(store.ids()).toEqual(['a', 'b']);
+    // And the layer is still usable.
+    pointer('pointerdown', 1050, 50);
+    pointer('pointermove', 1070, 50);
+    pointer('pointerup', 1070, 50);
+    expect(store.get('a')?.x).toBe(1020);
+    it_.dispose();
   });
 });

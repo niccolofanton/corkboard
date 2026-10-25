@@ -15,22 +15,29 @@
 // Parked cards are bounded by `maxMounted` (active + parked): on overflow the least valuable parked ones are
 // destroyed (off screen first, then least recently used) and only then does the poster show again.
 
+/** Default `embeds.maxLive` on a mouse / pen device. */
 export const MAX_LIVE_DESKTOP = 12;
+/** Default `embeds.maxLiveTouch` on a touch device. */
 export const MAX_LIVE_TOUCH = 3;
-// Mounted iframes in total (active + parked).
+/** Mounted iframes in total (active + parked). */
 export const MAX_MOUNTED_DESKTOP = 24;
 export const MAX_MOUNTED_TOUCH = 6;
-// Culled (off screen) iframes kept alive, a subset of the mounted ones.
+/** Culled (off screen) iframes kept alive, a subset of the mounted ones. */
 export const MAX_OFFSCREEN_DESKTOP = 64;
 export const MAX_OFFSCREEN_TOUCH = 12;
+/** Width of the 320 x 200 reference box, CSS px: the aspect a numeric `embeds.minLivePx` keeps. */
 export const MIN_LIVE_W = 320;
+/** Height of the 320 x 200 reference box, CSS px. */
 export const MIN_LIVE_H = 200;
-// Below this zoom nothing mounts, selected or not.
+/** Below this zoom nothing mounts, selected or not. */
 export const MIN_LIVE_SCALE = 0.25;
-// A live card is kept until it shrinks under this fraction of the size that earned it the iframe, so a
-// card hovering around the threshold does not flicker between poster and iframe.
+/**
+ * A live card is kept until it shrinks under this fraction of the size that earned it the iframe, so a
+ * card hovering around the threshold does not flicker between poster and iframe.
+ */
 export const KEEP_FACTOR = 0.6;
 
+/** A card as the live-iframe policy sees it. */
 export interface PolicyCard {
   id: string;
   // CSS px on screen: the part of the card that is in view.
@@ -51,6 +58,7 @@ export interface PolicyCard {
   lastSeen?: number;
 }
 
+/** Input of {@link planLive}: the cards, the caps and the zoom. */
 export interface PolicyInput {
   cards: readonly PolicyCard[];
   // Pan, zoom or pinch in progress: nothing changes until it settles.
@@ -68,6 +76,7 @@ export interface PolicyInput {
   minScale?: number;
 }
 
+/** What {@link planLive} decides: which cards go live and which are parked. */
 export interface PolicyPlan {
   mount: string[];
   destroy: string[];
@@ -77,6 +86,7 @@ export interface PolicyPlan {
   culled: string[];
 }
 
+/** Whether a card may be live at this zoom: big enough on screen, or selected. Pure. */
 export function isEligible(c: PolicyCard, scale: number, o: Pick<PolicyInput, 'minW' | 'minH' | 'minScale'>): boolean {
   if (!c.frameable || !c.onScreen) return false;
   // Only in the cull margin: not in view.
@@ -87,6 +97,7 @@ export function isEligible(c: PolicyCard, scale: number, o: Pick<PolicyInput, 'm
   return c.screenW >= (o.minW ?? MIN_LIVE_W) * k && c.screenH >= (o.minH ?? MIN_LIVE_H) * k;
 }
 
+/** Chooses which embed cards hold a live iframe, within the caps. Pure. */
 export function planLive(input: PolicyInput): PolicyPlan {
   const plan: PolicyPlan = { mount: [], destroy: [], parked: [], culled: [] };
   if (input.cameraMoving) return plan;

@@ -13,6 +13,8 @@
 // the compositor, so the fade starts on a picture and never on a black or empty box); else `playing` once
 // the clock has moved. A safety timer covers a browser that never calls back (a hidden tab).
 
+import { acquireStyle } from '../styles';
+
 const STYLE_ATTR = 'data-corkboard-video';
 
 // In: the first frame over the picture. Out: back to the picture. The ring is a ring on a soft disc, so it
@@ -28,14 +30,17 @@ const CSS = `
 @media (prefers-reduced-motion:reduce){.cb-video,.cb-spinner{transition:none}.cb-ring{animation:none}}
 `;
 
-// Appends the stylesheet to the document's <head> the first time it is needed (idempotent).
-export function injectRevealStyles(doc: Document = document): void {
-  const head = doc.head;
-  if (!head || head.querySelector(`style[${STYLE_ATTR}]`)) return;
-  const style = doc.createElement('style');
-  style.setAttribute(STYLE_ATTR, '');
-  style.textContent = CSS;
-  head.appendChild(style);
+const SHEET = {
+  selector: `style[${STYLE_ATTR}]`,
+  mark: (el: HTMLStyleElement): void => el.setAttribute(STYLE_ATTR, ''),
+  css: CSS,
+};
+
+// Puts the stylesheet in the document's <head> (one for all its users, reference-counted) and returns the
+// function that lets go of it: the last one out removes it. A caller that never calls it keeps the style
+// for the life of the document. `nonce` is for a CSP with a nonce-based `style-src`.
+export function injectRevealStyles(doc: Document = document, nonce?: string): () => void {
+  return acquireStyle(doc, SHEET, nonce);
 }
 
 export type RevealState = 'poster' | 'loading' | 'playing' | 'stalled';
@@ -69,6 +74,8 @@ export interface VideoRevealOptions {
   host?: HTMLElement | null;
   // Called when the state changes (a card that also wants it in React state; at most a few times a hover).
   onState?: (state: RevealState) => void;
+  // `nonce` of the injected <style> (a CSP with a nonce-based `style-src`).
+  nonce?: string;
 }
 
 export interface VideoReveal {
@@ -85,7 +92,7 @@ export function attachVideoReveal(
   opts: VideoRevealOptions = {},
 ): VideoReveal {
   const v = video;
-  injectRevealStyles(v.ownerDocument);
+  const releaseStyles = injectRevealStyles(v.ownerDocument, opts.nonce);
   const host = opts.host === undefined ? video.parentElement : opts.host;
   // Older browsers (and jsdom) have no frame callbacks; the types say every one does.
   const hasRvfc = typeof v.requestVideoFrameCallback === 'function';
@@ -263,6 +270,7 @@ export function attachVideoReveal(
     dispose() {
       if (disposed) return;
       disposed = true;
+      releaseStyles();
       generation++;
       clearFrameWatch();
       if (busyTimer !== null) clearTimeout(busyTimer);
@@ -280,6 +288,11 @@ export function attachVideoReveal(
 // the host's data-busy is "true".
 export function createRevealSpinner(doc: Document): HTMLElement {
   injectRevealStyles(doc);
+  return buildRevealSpinner(doc);
+}
+
+// The same, without touching the stylesheet: for a caller that already holds it.
+export function buildRevealSpinner(doc: Document): HTMLElement {
   const disc = doc.createElement('span');
   disc.className = 'cb-spinner';
   disc.setAttribute('aria-hidden', 'true');

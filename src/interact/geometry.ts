@@ -3,16 +3,17 @@
 // renderer, hit testing, snapping and layout.
 //
 // Convention (types.ts): `rot` is degrees clockwise about the element's centre.
-import type { Element } from '../types';
+import type { Card } from '../types';
 
-// rbush-compatible box.
-export interface Box {
+/** Axis-aligned bounding box in world px, rbush-compatible. */
+export interface Aabb {
   minX: number;
   minY: number;
   maxX: number;
   maxY: number;
 }
 
+/** A rectangle in world px: position and size. */
 export interface WorldRect {
   x: number;
   y: number;
@@ -23,21 +24,21 @@ export interface WorldRect {
 
 export const DEG = Math.PI / 180;
 
-export const emptyBox = (): Box => ({
+export const emptyBox = (): Aabb => ({
   minX: Infinity,
   minY: Infinity,
   maxX: -Infinity,
   maxY: -Infinity,
 });
-export const boxW = (b: Box): number => b.maxX - b.minX;
-export const boxH = (b: Box): number => b.maxY - b.minY;
-export const boxCx = (b: Box): number => (b.minX + b.maxX) / 2;
-export const boxCy = (b: Box): number => (b.minY + b.maxY) / 2;
+export const boxW = (b: Aabb): number => b.maxX - b.minX;
+export const boxH = (b: Aabb): number => b.maxY - b.minY;
+export const boxCx = (b: Aabb): number => (b.minX + b.maxX) / 2;
+export const boxCy = (b: Aabb): number => (b.minY + b.maxY) / 2;
 
-export function boxesIntersect(a: Box, b: Box): boolean {
+export function boxesIntersect(a: Aabb, b: Aabb): boolean {
   return a.minX <= b.maxX && a.maxX >= b.minX && a.minY <= b.maxY && a.maxY >= b.minY;
 }
-export function boxContains(outer: Box, inner: Box): boolean {
+export function boxContains(outer: Aabb, inner: Aabb): boolean {
   return (
     outer.minX <= inner.minX &&
     outer.minY <= inner.minY &&
@@ -45,7 +46,7 @@ export function boxContains(outer: Box, inner: Box): boolean {
     outer.maxY >= inner.maxY
   );
 }
-export function boxUnion(a: Box, b: Box): Box {
+export function boxUnion(a: Aabb, b: Aabb): Aabb {
   return {
     minX: Math.min(a.minX, b.minX),
     minY: Math.min(a.minY, b.minY),
@@ -53,14 +54,14 @@ export function boxUnion(a: Box, b: Box): Box {
     maxY: Math.max(a.maxY, b.maxY),
   };
 }
-export function boxGrow(b: Box, by: number): Box {
+export function boxGrow(b: Aabb, by: number): Aabb {
   return { minX: b.minX - by, minY: b.minY - by, maxX: b.maxX + by, maxY: b.maxY + by };
 }
-export function boxOfRect(r: { x: number; y: number; w: number; h: number }): Box {
+export function boxOfRect(r: { x: number; y: number; w: number; h: number }): Aabb {
   return { minX: r.x, minY: r.y, maxX: r.x + r.w, maxY: r.y + r.h };
 }
 
-export function worldRectOf(el: Pick<Element, 'x' | 'y' | 'w' | 'h' | 'rot'>): WorldRect {
+export function worldRectOf(el: Pick<Card, 'x' | 'y' | 'w' | 'h' | 'rot'>): WorldRect {
   return { x: el.x, y: el.y, w: el.w, h: el.h, rot: el.rot };
 }
 
@@ -72,8 +73,8 @@ export function rotatedExtent(w: number, h: number, rotDeg: number): { w: number
   return { w: w * c + h * s, h: w * s + h * c };
 }
 
-// World AABB of an element (rotation included).
-export function elementBox(el: Pick<Element, 'x' | 'y' | 'w' | 'h' | 'rot'>): Box {
+/** World AABB of an element (rotation included). */
+export function elementBox(el: Pick<Card, 'x' | 'y' | 'w' | 'h' | 'rot'>): Aabb {
   const r = worldRectOf(el);
   const cx = r.x + r.w / 2;
   const cy = r.y + r.h / 2;
@@ -81,7 +82,7 @@ export function elementBox(el: Pick<Element, 'x' | 'y' | 'w' | 'h' | 'rot'>): Bo
   return { minX: cx - e.w / 2, minY: cy - e.h / 2, maxX: cx + e.w / 2, maxY: cy + e.h / 2 };
 }
 
-// The four corners of a world rect, clockwise from the top-left: [x0, y0, x1, y1, x2, y2, x3, y3].
+/** The four corners of a world rect, clockwise from the top-left: [x0, y0, x1, y1, x2, y2, x3, y3]. */
 export function corners(r: WorldRect): number[] {
   const cx = r.x + r.w / 2;
   const cy = r.y + r.h / 2;
@@ -102,7 +103,7 @@ export function corners(r: WorldRect): number[] {
   return pts;
 }
 
-// A world point expressed in the rect's own (unrotated, origin at its top-left) frame.
+/** A world point expressed in the rect's own (unrotated, origin at its top-left) frame. */
 export function toRectLocal(r: WorldRect, px: number, py: number): { x: number; y: number } {
   const cx = r.x + r.w / 2;
   const cy = r.y + r.h / 2;
@@ -114,7 +115,7 @@ export function toRectLocal(r: WorldRect, px: number, py: number): { x: number; 
   return { x: dx * c - dy * s + r.w / 2, y: dx * s + dy * c + r.h / 2 };
 }
 
-// Rect-local -> world.
+/** Rect-local -> world. */
 export function fromRectLocal(r: WorldRect, lx: number, ly: number): { x: number; y: number } {
   const cx = r.x + r.w / 2;
   const cy = r.y + r.h / 2;
@@ -126,13 +127,13 @@ export function fromRectLocal(r: WorldRect, lx: number, ly: number): { x: number
   return { x: cx + dx * c - dy * s, y: cy + dx * s + dy * c };
 }
 
-// `tol` grows the rect on every side (world px).
+/** `tol` grows the rect on every side (world px). */
 export function pointInRotatedRect(r: WorldRect, px: number, py: number, tol = 0): boolean {
   const l = toRectLocal(r, px, py);
   return l.x >= -tol && l.y >= -tol && l.x <= r.w + tol && l.y <= r.h + tol;
 }
 
-// Squared distance from (px, py) to the segment (ax, ay)-(bx, by).
+/** Squared distance from (px, py) to the segment (ax, ay)-(bx, by). */
 export function distSqToSegment(
   px: number,
   py: number,
@@ -151,7 +152,7 @@ export function distSqToSegment(
   return qx * qx + qy * qy;
 }
 
-// Separating-axis test between two rotated rects (touching counts).
+/** Separating-axis test between two rotated rects (touching counts). */
 export function rotatedRectsIntersect(a: WorldRect, b: WorldRect): boolean {
   const ca = corners(a);
   const cb = corners(b);
@@ -183,16 +184,16 @@ export function rotatedRectsIntersect(a: WorldRect, b: WorldRect): boolean {
   return true;
 }
 
-// True when `box` intersects the (possibly rotated) rect.
-export function boxIntersectsRotatedRect(box: Box, r: WorldRect): boolean {
+/** True when `box` intersects the (possibly rotated) rect. */
+export function boxIntersectsRotatedRect(box: Aabb, r: WorldRect): boolean {
   return rotatedRectsIntersect(
     { x: box.minX, y: box.minY, w: box.maxX - box.minX, h: box.maxY - box.minY, rot: 0 },
     r,
   );
 }
 
-// True when the (possibly rotated) rect lies entirely inside `box`.
-export function rotatedRectInsideBox(r: WorldRect, box: Box): boolean {
+/** True when the (possibly rotated) rect lies entirely inside `box`. */
+export function rotatedRectInsideBox(r: WorldRect, box: Aabb): boolean {
   const c = corners(r);
   for (let i = 0; i < 4; i++) {
     const x = c[i * 2];
