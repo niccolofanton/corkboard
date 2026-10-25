@@ -50,8 +50,14 @@ jobs:
       - if: matrix.pixi == 'latest'
         run: pnpm add -D pixi.js@^8
       - run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
-      # Builds the library first (`build:e2e`), then runs the one project of this job.
-      - run: pnpm test:e2e --project=${{ matrix.browser }}
+      # Builds the library first (`build:e2e`), then runs the one project of this job. Firefox runs headed under
+      # xvfb: headless it gets no WebGL2 on a runner without a GPU.
+      - if: matrix.browser == 'chromium'
+        run: pnpm test:e2e --project=chromium
+      - if: matrix.browser == 'firefox'
+        run: xvfb-run -a pnpm test:e2e --project=firefox
+        env:
+          E2E_HEADED: '1'
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

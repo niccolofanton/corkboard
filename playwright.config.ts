@@ -34,6 +34,9 @@ export default defineConfig({
             name: 'firefox',
             use: {
               browserName: 'firefox' as const,
+              // Headless Firefox on a GPU-less Linux runner exposes no WebGL2; headed under xvfb it gets Mesa's
+              // software GL. CI runs this project with `xvfb-run` and E2E_HEADED=1.
+              headless: !process.env.E2E_HEADED,
               launchOptions: { firefoxUserPrefs: { 'webgl.force-enabled': true, 'webgl.disabled': false } },
             },
           },
