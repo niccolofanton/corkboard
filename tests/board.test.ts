@@ -33,6 +33,8 @@ vi.mock('../src/render/stage', () => ({
         previewRectOf: () => undefined,
         activeTheme: () => 'dark',
         markDirty: () => {},
+        setPosterOverride: () => {},
+        posterShown: () => false,
         fitRect: vi.fn(),
         boundsOf: () => undefined,
         setCamera: vi.fn(),
