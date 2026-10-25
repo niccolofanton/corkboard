@@ -7,7 +7,7 @@
 //         browser's compositing of iframes and videos; "idle" while the board draws nothing; n/a where the
 //         timer query is unsupported.
 //   VRAM  the board's own textures, not the GPU memory of the whole page.
-import type { Corkboard } from 'corkboard';
+import type { Corkboard } from '@niccolofanton/corkboard';
 
 const STEP_MS = 250;
 const WINDOW_MS = 30_000;

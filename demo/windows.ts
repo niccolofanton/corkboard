@@ -1,7 +1,7 @@
 // The "1000 windows" board: many different cards, generated from a seeded generator so a reload shows the same
 // board. ~45% small self-contained HTML snippets (they animate on their own, no network), ~6% YouTube videos,
 // ~4% Wikipedia articles, ~35% pictures and ~10% video clips.
-import type { ElementInit } from 'corkboard';
+import type { ElementInit } from '@niccolofanton/corkboard';
 
 // What a template is parameterised with.
 interface Params {

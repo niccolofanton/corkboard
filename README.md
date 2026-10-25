@@ -11,36 +11,51 @@ Pictures go through a level-of-detail pipeline that starts at a ThumbHash, moves
 ## Install
 
 ```sh
-pnpm add corkboard pixi.js
+npm i @niccolofanton/corkboard pixi.js
 ```
 
-`pixi.js` (^8.22.0) is a peer dependency: one copy, shared with your app.
+`pixi.js` (^8.22.0) is a peer dependency: one copy, shared with your app. The package is ESM-only (`import`, no
+`require`), ships its own TypeScript declarations, and is tree-shakeable (`sideEffects: false`).
+
+Browser support: any browser with WebGL2. Snapshots of HTML embeds (see [Embeds](#embeds)) are not available in Safari,
+where the frame simply stays live.
 
 ## Quick start
 
 ```ts
-import { Corkboard } from 'corkboard';
+import { Corkboard } from '@niccolofanton/corkboard';
 
-const board = await Corkboard.create(document.getElementById('board')!, { theme: 'dark' });
-board.add([
-  { media: { src: 'https://picsum.photos/seed/1/480/600', aspect: 1.25 } },
-  { media: { src: 'https://picsum.photos/seed/2/480/270', video: 'https://example.com/clip.mp4' } },
-]);
-board.layout.tidy();
-board.camera.fit();
-board.on('selection', ({ ids }) => console.log(ids));
+async function main(): Promise<void> {
+  const board = await Corkboard.create(document.getElementById('board')!, { theme: 'dark' });
+  board.add([
+    { media: { src: 'https://picsum.photos/seed/1/480/600', aspect: 1.25 } },
+    { media: { src: 'https://picsum.photos/seed/2/480/270', video: 'https://example.com/clip.mp4' } },
+  ]);
+  board.layout.tidy();
+  board.camera.fit();
+  board.on('selection', ({ ids }) => console.log(ids));
+}
+void main();
 ```
+
+`Corkboard.create` is async (it starts the WebGL renderer). A top-level `await` works too where your build target allows it
+(Vite's default target does not: set `build.target: 'es2022'`).
 
 Pictures are read by a decode worker with `fetch`, so they need CORS headers. Videos only need to be playable by `<video>`.
 
+## Bundlers & CSP
+
 The decode worker is inlined in the library and started from a blob URL, so it works under any bundler or dev server (no
 asset URL to resolve, no `optimizeDeps` setting). A page whose CSP has no `worker-src blob:` (or `child-src blob:` /
-`script-src blob:` as the fallback) can serve the worker itself instead:
+`script-src blob:` as the fallback) can serve the worker itself instead: the package exports it as
+`@niccolofanton/corkboard/decode.worker.js`. Pass its URL as `textures.workerUrl`:
 
 ```ts
-import workerUrl from 'corkboard/decode.worker?url'; // Vite; any bundler that gives you the file's URL
+import workerUrl from '@niccolofanton/corkboard/decode.worker.js?url'; // Vite (types from vite/client); any bundler that gives you the file's URL
 await Corkboard.create(el, { textures: { workerUrl } });
 ```
+
+For a CSP without `unsafe-eval`, also pass `cspSafe: true` (Pixi's `unsafe-eval` build).
 
 ## API
 
@@ -163,7 +178,7 @@ pnpm install    # pnpm 10.11.1 (see packageManager); pixi.js is a devDependency 
 pnpm dev        # the demo (600 cards)
 pnpm test
 pnpm typecheck
-pnpm build      # dist/ with .d.ts and dist/decode.worker.js
+pnpm build      # dist/: library, bundled index.d.ts, decode.worker.js
 ```
 
 ## License

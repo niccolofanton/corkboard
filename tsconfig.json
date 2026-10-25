@@ -23,7 +23,7 @@
     ],
     "noEmit": true,
     "paths": {
-      "corkboard": [
+      "@niccolofanton/corkboard": [
         "./src/index.ts"
       ]
     }

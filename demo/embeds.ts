@@ -2,7 +2,7 @@
 //   1. Stretched previews: an embed card's poster is drawn stretched when its aspect differs from the card's.
 //   2. Embeds vanish too early: a live iframe is swapped for the poster while it is still plainly visible.
 // Only the public API is used, so the page works against any version of the library.
-import { Corkboard, type ElementInit, type EmbedInfo } from 'corkboard';
+import { Corkboard, type ElementInit, type EmbedInfo } from '@niccolofanton/corkboard';
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 

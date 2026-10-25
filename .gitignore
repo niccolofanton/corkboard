@@ -1,5 +1,7 @@
 node_modules
 dist
 dist-demo
+.types
+*.tgz
 *.log
 .DS_Store

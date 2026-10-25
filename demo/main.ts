@@ -4,7 +4,7 @@ import {
   type EmbedInfo,
   type EmbedResolution,
   type VideoMode,
-} from 'corkboard';
+} from '@niccolofanton/corkboard';
 import { startPerfPanel } from './perfChart';
 import { makeSnippet, makeWindows, placeWindows } from './windows';
 

@@ -44,7 +44,8 @@ export interface StageOptions {
   // Decode workers (default: a quarter of the cores, 1..4).
   workers?: number;
   // URL of the decode worker script, for pages whose CSP forbids `worker-src blob:` (the built-in worker is
-  // inlined and started from a blob URL). Serve `corkboard/decode.worker` yourself and pass its URL here.
+  // inlined and started from a blob URL). Serve `@niccolofanton/corkboard/decode.worker.js` yourself and pass
+  // its URL here.
   workerUrl?: string | URL;
   softCanvas?: boolean;
   // Per-frame texture upload budget, ms (default 4).
