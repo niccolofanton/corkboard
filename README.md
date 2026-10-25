@@ -1,10 +1,14 @@
 # Corkboard
 
+[![npm](https://img.shields.io/npm/v/@niccolofanton/corkboard)](https://www.npmjs.com/package/@niccolofanton/corkboard)
+[![CI](https://github.com/niccolofanton/corkboard/actions/workflows/ci.yml/badge.svg)](https://github.com/niccolofanton/corkboard/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/@niccolofanton/corkboard)](LICENSE)
+
 ![Corkboard](docs/preview.gif)
 
 Corkboard is a framework-agnostic TypeScript library that puts an infinite WebGL canvas of image, video and embed cards on screen, built on Pixi v8 and extracted from a moodboard app. It is meant for large boards on an ordinary laptop, so most of the work is in not doing work: the render loop is on demand and sits at 0 requestAnimationFrame callbacks while nothing moves, and an rbush index culls cards outside the view.
 
-Pictures go through a level-of-detail pipeline that starts at a ThumbHash, moves to a shared atlas, and ends in per-card textures with baked rounded corners, all decoded in workers and kept under an LRU memory budget. A video card is its poster in WebGL plus a `<video>` element synced to the camera; an embed (YouTube, Vimeo, Spotify, CodePen, Figma, any page or a snippet of HTML) is a poster sprite that becomes a sandboxed iframe, laid out at a virtual 720p or 1080p screen and scaled down, only when it is large on screen or selected. Auto layout (masonry, tidy grid, align, distribute) animates cards to their new places, and dragging snaps to smart guides or to the dot grid.
+Pictures go through a level-of-detail pipeline that starts at a ThumbHash, moves to a shared atlas, and ends in per-card textures with baked rounded corners, all decoded in workers and kept under an LRU memory budget. A video card is its poster in WebGL plus a `<video>` element synced to the camera; an embed (YouTube, Vimeo, Spotify, CodePen, Figma, any page or a snippet of HTML) is a poster sprite that becomes a sandboxed iframe, laid out at a virtual 720p or 1080p screen and scaled down, as soon as it is in view (loaded a few at a time, hidden off screen, frozen to a snapshot when too small to read). Auto layout (masonry, tidy grid, align, distribute) animates cards to their new places, and dragging snaps to smart guides or to the dot grid.
 
 **Live: [corkboard.niccolofanton.dev](https://corkboard.niccolofanton.dev)**
 
