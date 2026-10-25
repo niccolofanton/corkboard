@@ -429,6 +429,7 @@ export class TextureManager {
         soft: this.opts.softCanvas,
         radiusWorld: card.radius,
         worldLong: Math.max(card.w, card.h),
+        aspect: card.w > 0 ? card.h / card.w : undefined,
         border: req.level === 0 ? undefined : this.border || undefined,
       };
       this.workers[wi].postMessage(msg);

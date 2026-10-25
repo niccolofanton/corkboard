@@ -257,6 +257,28 @@ describe('Stage baked corner radius', () => {
     expect(stage.tm.has(card, 0)).toBe(true);
   });
 
+  it('bakes again when the card is resized to another shape (the textures are cropped to it)', async () => {
+    const { stage, store, card } = await landed();
+    // 200 x 100 -> 200 x 150: same width, not the same shape.
+    store.update('a', { w: 200, h: 150 });
+    dom.drain();
+    expect(stage.tm.has(card, 0)).toBe(false);
+  });
+
+  it('keeps the textures for a shape change under 1%, and for a square-cornered card too', async () => {
+    const { stage, store, card } = await landed();
+    store.update('a', { w: 200, h: 100.5 });
+    dom.drain();
+    expect(stage.tm.has(card, 0)).toBe(true);
+    store.update('a', { radius: 0 });
+    dom.drain();
+    land();
+    dom.drain();
+    store.update('a', { w: 200, h: 150 });
+    dom.drain();
+    expect(stage.tm.has(card, 0)).toBe(false);
+  });
+
   it('does not touch the textures during a live resize preview', async () => {
     const { stage, card } = await landed();
     for (const w of [300, 500, 800]) stage.setPreview('a', 0, 0, w, w / 2, 0);

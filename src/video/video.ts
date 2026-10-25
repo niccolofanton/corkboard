@@ -10,8 +10,8 @@
 // The card's own thumbnail (drawn by WebGL, underneath) is the poster. The <video> is transparent until a
 // frame of it is on screen, then fades in over the thumbnail (reveal.ts: data-state / data-busy on the
 // overlay's host, the look in the injected `.cb-*` styles). It fills the card's box the way the sprite
-// does (`object-fit: fill`: a card is aspect-locked, and the thumbnail is stretched to its box), so the
-// two are one picture and the fade shows no crop. While the picture a card was asked for is not there (loading, or stalled mid-way) a ring spins
+// does (`object-fit: cover`: the thumbnail is cropped to the card's shape, centred, never stretched), so
+// the two are one picture and the fade shows no jump. While the picture a card was asked for is not there (loading, or stalled mid-way) a ring spins
 // over its centre after INDICATOR_DELAY_MS, so a cached video never flashes it. Stopping fades back to
 // the thumbnail first, and only then lets go of the network.
 import type { Camera } from '../math';
@@ -97,7 +97,7 @@ export class VideoOverlay {
     // the card's.
     v.style.cssText =
       'position:absolute;left:0;top:0;transform-origin:0 0;pointer-events:none;' +
-      'max-width:none;max-height:none;object-fit:fill;display:none;';
+      'max-width:none;max-height:none;object-fit:cover;display:none;';
 
     // The ring stays upright and the same size on screen, centred on the card: placed by `transform`.
     const disc = createRevealSpinner(doc);

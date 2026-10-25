@@ -14,6 +14,10 @@ export interface DecodeRequest {
   // texels for the size it ends up with.
   radiusWorld: number;
   worldLong: number;
+  // The card's height / width (world). The worker crops the source to this shape, centred, before scaling
+  // (like CSS object-fit: cover), so a picture that is not the card's shape is not stretched. Omitted: the
+  // source keeps its own shape.
+  aspect?: number;
   // Bake in a software (CPU) canvas instead of a GPU-backed one. Default false.
   soft?: boolean;
   // CSS colour of the 1 px card hairline to bake in (omitted for L0).

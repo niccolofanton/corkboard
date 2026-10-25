@@ -55,6 +55,12 @@ afterEach(() => {
 const load = () => (tm as unknown as { workerLoad: number[] }).workerLoad;
 
 describe('TextureManager worker load', () => {
+  it("sends the card's height / width so the worker can crop to its shape", () => {
+    tm.setWanted([{ card: { ...card(1), w: 400, h: 100 }, level: 1, dist: 0 }]);
+    const m = FakeWorker.all[0].sent[0] as unknown as { aspect?: number };
+    expect(m.aspect).toBeCloseTo(0.25);
+  });
+
   it('counts a request in and out', () => {
     tm.setWanted(want(1, 2));
     expect(load()).toEqual([2]);

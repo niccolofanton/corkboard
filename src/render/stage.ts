@@ -78,6 +78,9 @@ const MOUNT_BUDGET_MS = 5;
 // drawn is radius * long / bakedLong. Up to this far off (world px) is left alone; past it the card is baked
 // again, which shows its placeholder for a moment. A square-cornered card never needs it.
 const BAKE_CORNER_SLACK = 1;
+// The textures are cropped to the card's height / width (cover): a ratio that moved by more than this fraction
+// since the bake is baked again.
+const BAKE_ASPECT_SLACK = 0.01;
 
 const pct = (a: Float32Array, n: number, p: number): number => {
   if (n === 0) return 0;
@@ -174,6 +177,8 @@ export class Stage {
   private slotOwn: Uint8Array = new Uint8Array(64);
   // Per slot: the long side (world px) the card's textures were last baked at (see BAKE_CORNER_SLACK).
   private slotBaked: Float32Array = new Float32Array(64);
+  // Per slot: the card's height / width the textures were cropped to (cover). 0 = none yet.
+  private slotBakedAspect: Float32Array = new Float32Array(64);
   private l0Missing = 0;
   // Decoded ThumbHash bytes of base64 strings, by string.
   private readonly hashCache = new Map<string, Uint8Array>();
@@ -609,6 +614,7 @@ export class Stage {
     this.slotOnScreen[s] = 0;
     this.slotOwn[s] = 0;
     this.slotBaked[s] = 0;
+    this.slotBakedAspect[s] = 0;
     this.slotCard[s] = null;
     this.slotView[s] = null;
     return s;
@@ -625,10 +631,13 @@ export class Stage {
     own.set(this.slotOwn);
     const baked = new Float32Array(n);
     baked.set(this.slotBaked);
+    const bakedAspect = new Float32Array(n);
+    bakedAspect.set(this.slotBakedAspect);
     this.slotLevel = lv;
     this.slotOnScreen = on;
     this.slotOwn = own;
     this.slotBaked = baked;
+    this.slotBakedAspect = bakedAspect;
   }
 
   private freeSlot(id: ElementId): void {
@@ -681,6 +690,7 @@ export class Stage {
     };
     this.fillCard(card, el);
     this.slotBaked[slot] = Math.max(el.w, el.h);
+    this.slotBakedAspect[slot] = el.w > 0 ? el.h / el.w : 0;
     return card;
   }
 
@@ -699,7 +709,9 @@ export class Stage {
   // Brings a slot's BoardCard up to date with its element and returns whether what is resident for it went
   // stale (and was forgotten). A rendition URL or ThumbHash that CHANGED (not just appeared) means another
   // picture; a different corner radius, or a long side so far from the size the textures were baked at that
-  // the corners drawn are off by more than BAKE_CORNER_SLACK, means the baked rounded corners no longer fit.
+  // the corners drawn are off by more than BAKE_CORNER_SLACK, means the baked rounded corners no longer fit;
+  // and a height / width ratio that moved by more than BAKE_ASPECT_SLACK means the textures were cropped
+  // (cover) to another shape.
   // Only committed store changes get here: a live drag / resize preview never touches the card.
   private refreshCard(card: BoardCard, el: Element): boolean {
     const m = el.media;
@@ -708,18 +720,22 @@ export class Stage {
     const l3 = m.sizes?.large ?? m.src;
     const long = Math.max(el.w, el.h);
     const baked = this.slotBaked[card.id];
+    const aspect = el.w > 0 ? el.h / el.w : 0;
+    const bakedAspect = this.slotBakedAspect[card.id];
     const stale =
       (card.l1Url !== undefined && card.l1Url !== l1) ||
       (card.l2Url !== undefined && card.l2Url !== l2) ||
       (card.l3Url !== undefined && card.l3Url !== l3) ||
       (card.thumbhash !== undefined && !sameBytes(card.thumbhash, this.hashOf(m.thumbhash))) ||
       card.radius !== el.radius ||
-      (baked > 0 && (el.radius * Math.abs(long - baked)) / baked > BAKE_CORNER_SLACK);
+      (baked > 0 && (el.radius * Math.abs(long - baked)) / baked > BAKE_CORNER_SLACK) ||
+      (bakedAspect > 0 && Math.abs(aspect - bakedAspect) / bakedAspect > BAKE_ASPECT_SLACK);
     this.fillCard(card, el);
     if (stale) {
       this.tm.forget(card.id);
       this.slotLevel[card.id] = -1;
       this.slotBaked[card.id] = long;
+      this.slotBakedAspect[card.id] = aspect;
       this.l0Missing++;
     }
     return stale;

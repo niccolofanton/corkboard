@@ -2,6 +2,7 @@
 // ImageBitmap (transferred, zero copy). Corners are baked here so cards stay plain sprites that
 // batch with no masks or custom shaders 
 import { thumbHashToRGBA } from 'thumbhash';
+import { coverBake } from './cover';
 import type { DecodeRequest, WorkerIn, WorkerOut } from './decode.protocol';
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -14,9 +15,9 @@ function bake(
   srcH: number,
   req: DecodeRequest,
 ): { bitmap: ImageBitmap; w: number; h: number } {
-  const k = Math.min(1, req.maxLong / Math.max(srcW, srcH));
-  const w = Math.max(1, Math.round(srcW * k));
-  const h = Math.max(1, Math.round(srcH * k));
+  // Crop to the card's shape first (cover), so the sprite can be the card's size with no stretch and the
+  // corners baked below stay on the card's edge.
+  const { sx, sy, sw, sh, w, h } = coverBake(srcW, srcH, req.aspect, req.maxLong);
   const canvas = new OffscreenCanvas(w, h);
   // A GPU-backed canvas by default: its bitmap reaches the main context without a CPU round trip and
   // the whole load is ~2x faster than with `willReadFrequently` (software canvas, `soft: true`),
@@ -38,9 +39,9 @@ function bake(
   if (src instanceof ImageData) {
     const tmp = new OffscreenCanvas(srcW, srcH);
     (tmp.getContext('2d') as OffscreenCanvasRenderingContext2D).putImageData(src, 0, 0);
-    ctx.drawImage(tmp, 0, 0, w, h);
+    ctx.drawImage(tmp, sx, sy, sw, sh, 0, 0, w, h);
   } else {
-    ctx.drawImage(src, 0, 0, w, h);
+    ctx.drawImage(src, sx, sy, sw, sh, 0, 0, w, h);
   }
   if (req.border) {
     // The hairline: stroke the clip path itself, twice as wide as wanted since the clip

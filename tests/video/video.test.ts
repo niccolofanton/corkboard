@@ -81,8 +81,8 @@ describe('VideoOverlay', () => {
     expect(v.hasAttribute('disablepictureinpicture')).toBe(true);
     const m = styleMap(v);
     expect(m.get('pointer-events')).toBe('none');
-    // The thumbnail (a WebGL sprite) is stretched to the card's box: so is the video, or the fade shows two crops.
-    expect(m.get('object-fit')).toBe('fill');
+    // The thumbnail (a WebGL sprite) is cropped to the card's shape: so is the video, or the fade shows two crops.
+    expect(m.get('object-fit')).toBe('cover');
     expect(m.get('position')).toBe('absolute');
     expect(m.get('left')).toBe('0px');
     expect(m.get('top')).toBe('0px');
