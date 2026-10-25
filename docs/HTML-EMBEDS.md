@@ -2,12 +2,14 @@
 
 Research date: 2026-10-12. Context: PixiJS v8 canvas, 1000+ media cards, culling + LOD textures, existing camera-synced DOM layer used for live `<video>`.
 
+> **Updated 2026-10-25.** Sections 1-10 are the original research. What the library ships today departs from §6 on purpose (every card in view goes live, frames are kept and culled rather than destroyed, small snippets freeze to a snapshot): see **§11, Embed lifecycle as implemented**.
+
 ## TL;DR
 
-- **Hybrid LOD is confirmed.** Poster texture in WebGL by default; one live sandboxed `<iframe>` in the camera-synced DOM layer only for the few cards that are large enough and focused.
+- **Hybrid LOD is confirmed.** Poster texture in WebGL under every card; a live sandboxed `<iframe>` in the camera-synced DOM layer over it. (The research proposed iframes only for the few big, focused cards; the implementation mounts every card in view and keeps the cost down by culling, freezing and pausing instead: §11.)
 - **HTML-in-Canvas does not replace the iframe path.** It cannot paint cross-origin iframe content (by design), it is Chromium-only, and it is still an origin trial. At most it is a progressive enhancement for same-origin, non-iframe snippets.
 - **Posters come from the network, not the browser.** oEmbed `thumbnail_url`, then `og:image`, then a server-side screenshot. In-browser rasterizers cannot see cross-origin iframes.
-- **Snippets run in `sandbox="allow-scripts"` `srcdoc` iframes** (opaque origin). A tiny injected script can snapshot its own DOM and `postMessage` a poster out.
+- **Snippets run in `sandbox="allow-scripts"` `srcdoc` iframes** (opaque origin). A tiny injected script serialises its own DOM and `postMessage`s it out; the parent rasterises it into the card's poster (§11).
 
 ## 1. Technique comparison
 
@@ -77,6 +79,8 @@ Checked live with `curl` on 2026-10-12 unless noted.
 
 ## 6. Recommendation
 
+> The original recommendation, kept for its reasoning. The shipped lifecycle (§11) differs: no size threshold or 4-frame cap by default, and off-screen frames are hidden with `display:none` within a budget instead of destroyed, because destroying them meant reloading and a poster flash every time a card came back.
+
 **Hybrid LOD, three states per embed card:**
 
 1. **`poster`** (default, all cards): Pixi sprite with the poster texture + a play/globe badge. Participates in culling, LOD, selection, z-order like any media card. Zero DOM.
@@ -135,10 +139,11 @@ Rules:
 ## 7. User-authored HTML snippets
 
 - **Render:** `<iframe sandbox="allow-scripts" srcdoc="...">` (profile above). Opaque origin: scripts run, no access to cookies/storage/parent DOM ([MDN CSP sandbox](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/sandbox)).
-- **Poster (preferred, my design, untested):** inject a small bootstrap into `srcdoc` that, on `load` + idle, runs a bundled DOM rasterizer (modern-screenshot/html-to-image) on its **own** document and `postMessage`s a PNG/WebP blob to the parent. The parent checks `event.source === iframe.contentWindow`, size/MIME limits, then stores it as the poster. Works with JS-generated content and needs no server. Caveat: the snippet can post a fake image to its own card (harmless), and `foreignObject` rasterizing has Safari quirks (see [WebKit 43911](https://bugs.webkit.org/show_bug.cgi?id=43911)).
+- **Poster (shipped, see §11):** the bootstrap serialises the document and the parent rasterises it; no DOM rasterizer library is bundled.
+- **Poster (original idea):** inject a small bootstrap into `srcdoc` that, on `load` + idle, runs a bundled DOM rasterizer (modern-screenshot/html-to-image) on its **own** document and `postMessage`s a PNG/WebP blob to the parent. The parent checks `event.source === iframe.contentWindow`, size/MIME limits, then stores it as the poster. Works with JS-generated content and needs no server. Caveat: the snippet can post a fake image to its own card (harmless), and `foreignObject` rasterizing has Safari quirks (see [WebKit 43911](https://bugs.webkit.org/show_bug.cgi?id=43911)).
 - **Poster (fallback):** Cloudflare Browser Rendering `/screenshot` with the `html` param (runs JS, no snapshot script needed, but metered).
 - **Sanitized static variant:** if the editor offers a "no scripts" mode, sanitize with DOMPurify, render in a hidden same-origin container, snapshot with D, and (Chromium + origin trial) optionally upload as texture via HTML-in-Canvas. Do not do this for script-enabled snippets (the sandbox would block readback).
-- **Size limits:** cap source at ~256 KB, cap `srcdoc` iframe layout size, throttle `requestAnimationFrame`-heavy snippets by destroying the iframe when not live.
+- **Size limits:** cap source at ~256 KB, cap `srcdoc` iframe layout size. `requestAnimationFrame`-heavy snippets are throttled by pausing (the bootstrap gates rAF and pauses Web Animations) and by freezing small ones to a snapshot, not by destroying the iframe (§11).
 
 ## 8. Element model
 
@@ -181,6 +186,82 @@ type EmbedElement = {
 3. Snippets (`srcdoc` sandbox + bootstrap snapshot for the poster).
 4. Server screenshot queue for pages without thumbnails.
 5. HTML-in-Canvas experiment behind a flag, only after Chrome stable ships it.
+
+## 11. Embed lifecycle as implemented (2026-10-25)
+
+Code: `src/embed/policy.ts` (which frames are mounted, pure rules), `src/embed/layer.ts` (DOM, timers, snapshots, pause), `src/embed/bootstrap.ts` (the script injected into snippets). Demo: `demo/embeds.html` (the two original bugs) and `/?windows=1000`.
+
+### States
+
+```
+poster ──(in view, camera still)──▶ loading ──(load)──▶ live
+  ▲                                                     │  ▲
+  │                                       small/out of  │  │ big again / selected
+  │                                       active budget ▼  │
+  │                                                   parked ──(small snippet)──▶ frozen
+  │                                                     │
+  │                                    off screen       ▼
+  └──────(past maxOffscreen / maxMounted)──────────── culled
+```
+
+| State | What the user sees | DOM | Cost |
+|---|---|---|---|
+| `poster` | The WebGL sprite: provider thumbnail, host poster, generated tile, or the card's last snapshot | none | a texture |
+| `loading` | The poster under a dark veil with a spinner | iframe, `opacity:0` | page load; at most `maxLoading` (6) at once, nearest the view centre first; a frame that never loads gives its slot up after 8 s |
+| `live` | The iframe | iframe over the sprite | full page |
+| `parked` | The iframe, still showing its page | iframe, inert | snippets paused (rAF gated, animations paused), YouTube/Vimeo paused on the current frame |
+| `frozen` | A snapshot of the snippet's current frame, as the sprite's texture | iframe `display:none`, alive | none; thaws instantly |
+| `culled` | Nothing (off screen) | iframe `display:none`, alive | none; shows again instantly |
+
+A frame that has gone live is **never swapped back to its poster for being small**. It only goes back to a poster when it is destroyed: removed card, over the culled or mounted budget, or its embed changed.
+
+### Rules and defaults (`EmbedOptions`)
+
+| Option | Default | Meaning |
+|---|---|---|
+| `minLivePx`, `minLiveScale` | `0`, `0` | Any card in view goes live, whatever its size or zoom. `320` / `0.25` restore the research's thresholds |
+| `maxLive` / `maxLiveTouch` | 12 / 3 | Active frames (mounted and allowed to run). `Infinity` = no cap |
+| `maxMounted` / `maxMountedTouch` | 24 / 6 | Active + parked + culled |
+| `maxOffscreen` / `maxOffscreenTouch` | 64 / 12 | Culled frames kept alive, most recently seen first; the rest are destroyed when the camera settles |
+| `cullMargin` | 0.5 | A card counts as on screen up to half a viewport past each edge: it keeps rendering, and cards entering the ring mount ahead of the pan |
+| `maxLoading` | 6 | Iframes loading at once (chunked start) |
+| `freezePx` | 140 | A snippet whose short side is under this many CSS px freezes to a snapshot; it thaws above 1.4× (hysteresis), when selected, or in interact mode. `0` disables |
+| `maxAnimating` | `Infinity` | Ceiling of frames allowed to animate |
+| `adaptive` | `true` | Lowers the animating budget when the page runs slow (below) |
+| `autoplay` | `false` | YouTube/Vimeo start muted and looping as soon as they go live |
+
+Nothing changes while the camera moves; the plan runs when it settles. Culling and thawing are the exception: they are checked every frame, so frames hide the moment they leave and come back the moment they return.
+
+### Snapshots (frozen snippets, last frame)
+
+- The layer posts `{ op: 'snapshot', id, w, h, vw, vh }` to the frame. The bootstrap clones the document (its stylesheets come along), bakes in the current value of whatever CSS / Web animations and transitions are changing, turns `<canvas>` elements into `data:` images, and answers with the SVG `<foreignObject>` markup.
+- The **parent** draws that SVG on a canvas (WebP). Drawing in the frame stalled for seconds: browsers throttle small cross-origin frames, and the image decode and `toBlob` waited on them. Copying every computed property of every element also made each snapshot take ~3 s; baking only the animated properties brought it to tens of ms.
+- At most 6 requests in flight; a failed one is retried twice, 2 s and 4 s later. A failure leaves the frame live, never a generic tile.
+- When a loaded snippet leaves the view, its cull is deferred until a snapshot has been taken (or 400 ms), at most once every 3 s per frame. That way the poster under it is its last frame when it returns. Two snapshot slots are always kept for freezing.
+- Limits: network images inside a snippet come out blank (an opaque origin cannot read them); a WebGL canvas without `preserveDrawingBuffer` comes out blank; Safari taints the canvas, so there the frame simply stays live.
+
+### Pausing and the adaptive budget
+
+- Snippets: `{ op: 'pause' | 'resume' }`. The bootstrap pauses `document.getAnimations()` and holds `requestAnimationFrame` callbacks until resume.
+- YouTube (`enablejsapi=1`) and Vimeo: `pauseVideo` / `playVideo` via `postMessage`, re-sent 1.5 s after load because the first command can be lost. A video is played again only if autoplay is on or the user started it.
+- Pages without a control channel (Wikipedia, generic URLs, Spotify, CodePen, Figma) can be neither paused nor snapshotted: they stay live while in view.
+- Adaptive budget: a rAF sampler (running only while something visible renders) measures fps over 1 s windows. Under 40 fps the number of animating frames drops to 70% (never below 6). After 2 windows over 55 fps it grows by a quarter, and the cap is lifted once it covers everything. The thresholds scale down on slower displays (a 30 Hz screen is judged against 30 Hz) but never up. Priority: interacting, selected, biggest on screen, nearest the centre.
+
+### No white flash
+
+Every hidden → visible transition (first load, return from culled, thaw from frozen) goes through one `reveal`. The wrapper stays transparent, so the WebGL poster underneath shows, until the frame has painted: snippets answer `{ op: 'show' }` with `{ op: 'painted' }` after two frames, other pages get a fixed 250 ms. Before this, the wrapper's white background showed for the ~100 ms a returning frame took to repaint.
+
+### Measured (1000-windows demo, Chromium, 120 Hz display)
+
+| Case | fps |
+|---|---|
+| Light page | 120 |
+| ~550 live frames, no freezing or pausing, board videos off | 30 |
+| Same, with freezing and pausing (≈440 frozen) | 53 |
+| All frames hidden, board videos off | 120 |
+| Any 8 playing `<video>` elements, even tiny and outside the board | 30 |
+
+Our own main-thread work shows no long tasks: the cost is in the frames and the video decoders. WebGPU would not change these numbers, because the board's WebGL draw is not the bottleneck and no GPU API can read a cross-origin frame's pixels.
 
 ## Sources
 
